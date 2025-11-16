@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
     # Camera Configuration
-    CAMERA_FPS: int = 1  # Reduced for faster processing
+    CAMERA_FPS: int = 0.2  # 0.2 FPS = 1 frame every 5 seconds = 12 calls/min (within free tier)
     MAX_CAMERAS: int = 4
     VIDEO_RESOLUTION_WIDTH: int = 640  # Reduced for faster processing
     VIDEO_RESOLUTION_HEIGHT: int = 480  # Reduced for faster processing

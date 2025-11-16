@@ -285,6 +285,109 @@ async def get_alerts(
         return []  # Return empty list if database not available
 
 
+@router.get("/alerts/recent-events")
+async def get_recent_events_with_images(
+    min_significance: int = 60,
+    hours: int = 24,
+    limit: int = 20
+):
+    """
+    Get recent significant events with supporting images from event_frames folder
+    Returns events with significance >= min_significance
+    """
+    from pathlib import Path
+    import os
+    from datetime import timedelta
+    
+    try:
+        # Get event frames directory
+        event_frames_dir = Path(__file__).parent.parent / "event_frames"
+        
+        if not event_frames_dir.exists():
+            return {"events": [], "message": "No event frames directory"}
+        
+        # Get all frame files sorted by modification time (newest first)
+        frame_files = sorted(
+            event_frames_dir.glob("camera*.jpg"),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )
+        
+        # Filter frames from last N hours
+        cutoff_time = datetime.utcnow() - timedelta(hours=hours)
+        recent_frames = [
+            f for f in frame_files
+            if datetime.fromtimestamp(f.stat().st_mtime) >= cutoff_time
+        ][:limit]
+        
+        # Build event summaries
+        events = []
+        for frame_file in recent_frames:
+            frame_name = frame_file.name
+            frame_url = f"/event_frames/{frame_name}"
+            
+            # Extract timestamp from filename (camera0_20251116_073346_551497.jpg)
+            try:
+                parts = frame_name.replace('.jpg', '').split('_')
+                if len(parts) >= 4:
+                    date_str = parts[1]  # 20251116
+                    time_str = parts[2]  # 073346
+                    
+                    # Parse timestamp
+                    year = int(date_str[:4])
+                    month = int(date_str[4:6])
+                    day = int(date_str[6:8])
+                    hour = int(time_str[:2])
+                    minute = int(time_str[2:4])
+                    second = int(time_str[4:6])
+                    
+                    event_time = datetime(year, month, day, hour, minute, second)
+                    timestamp = event_time.isoformat()
+                else:
+                    timestamp = datetime.fromtimestamp(frame_file.stat().st_mtime).isoformat()
+            except:
+                timestamp = datetime.fromtimestamp(frame_file.stat().st_mtime).isoformat()
+            
+            # Check if significance is in filename
+            significance = 65  # Default for events that triggered save
+            if '_sig' in frame_name:
+                try:
+                    sig_part = frame_name.split('_sig')[1].replace('.jpg', '')
+                    significance = int(sig_part)
+                except:
+                    pass
+            
+            # Only include if meets significance threshold
+            if significance >= min_significance:
+                event = {
+                    "id": frame_name.replace('.jpg', ''),
+                    "timestamp": timestamp,
+                    "camera_id": 0,
+                    "frame_url": frame_url,
+                    "frame_path": str(frame_file),
+                    "significance": significance,
+                    "severity": "CRITICAL" if significance >= 80 else "WARNING" if significance >= 70 else "INFO",
+                    "title": f"Event Detected - Significance {significance}%",
+                    "summary": f"Significant event captured at {timestamp}",
+                    "file_size": frame_file.stat().st_size,
+                    "is_read": False
+                }
+                events.append(event)
+        
+        return {
+            "events": events,
+            "count": len(events),
+            "min_significance": min_significance,
+            "hours": hours,
+            "message": f"Found {len(events)} significant events (>={min_significance}% confidence)"
+        }
+        
+    except Exception as e:
+        from loguru import logger
+        logger.error(f"Error getting recent events: {e}")
+        return {"events": [], "error": str(e)}
+
+
 @router.post("/alerts/{alert_id}/acknowledge")
 async def acknowledge_alert(alert_id: int, db: Session = Depends(get_db)):
     """
@@ -435,6 +538,74 @@ async def process_command_endpoint(command: dict):
         }
     except Exception as e:
         logger.error(f"[COMMAND API] Error processing command: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/test/send-alert")
+async def send_test_alert():
+    """
+    Send a test alert with supporting image for demonstration
+    """
+    from pathlib import Path
+    import base64
+    
+    try:
+        # Get the most recent frame
+        event_frames_dir = Path(__file__).parent.parent / "event_frames"
+        frame_files = sorted(
+            event_frames_dir.glob("camera*.jpg"),
+            key=lambda x: x.stat().st_mtime,
+            reverse=True
+        )
+        
+        if not frame_files:
+            raise HTTPException(status_code=404, detail="No frames available")
+        
+        latest_frame = frame_files[0]
+        frame_url = f"/event_frames/{latest_frame.name}"
+        
+        # Read and encode frame
+        with open(latest_frame, 'rb') as f:
+            frame_base64 = base64.b64encode(f.read()).decode('utf-8')
+        
+        # Create test alert
+        alert_data = {
+            "id": f"test_alert_{int(datetime.utcnow().timestamp())}",
+            "severity": "WARNING",
+            "title": "🎯 Test Alert - Object Detection Demo",
+            "message": """**Event Detected** (Confidence: 75%)
+
+**Scene:** Test detection event - system is monitoring successfully
+
+**Activity:** Continuous monitoring active
+
+**Objects Detected:** Testing alert system with supporting images
+
+**Time:** """ + datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S') + """
+**Camera:** 0
+**Context:** This is a test alert to demonstrate the image display feature""",
+            "camera_id": 0,
+            "timestamp": datetime.utcnow().isoformat(),
+            "significance": 75,
+            "frame_url": frame_url,
+            "frame_path": str(latest_frame),
+            "frame_base64": frame_base64,
+            "detected_objects": ["test object", "camera", "surveillance"],
+            "is_read": False
+        }
+        
+        # Send via WebSocket
+        await manager.send_alert(alert_data)
+        logger.info(f"[TEST] Test alert sent with image: {frame_url}")
+        
+        return {
+            "status": "success",
+            "message": "Test alert sent with supporting image",
+            "alert": alert_data
+        }
+        
+    except Exception as e:
+        logger.error(f"[TEST] Error sending test alert: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

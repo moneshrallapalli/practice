@@ -140,17 +140,32 @@ function App() {
     }
   };
 
-  const handleAcknowledgeAlert = async (alertId: number) => {
+  const handleAcknowledgeAlert = async (alertId: number | string) => {
     try {
-      await alertApi.acknowledge(alertId);
-      setAlerts((prev) =>
-        prev.map((alert) =>
-          alert.id === alertId ? { ...alert, is_read: true } : alert
-        )
-      );
+      console.log('Acknowledging alert:', alertId);
+      
+      // Remove the alert from the list immediately (clear it)
+      setAlerts((prev) => {
+        const filtered = prev.filter((alert) => alert.id !== alertId);
+        console.log('Alerts after filter:', filtered.length);
+        return filtered;
+      });
+      
+      // If it's a numeric ID, also acknowledge in backend
+      if (typeof alertId === 'number') {
+        await alertApi.acknowledge(alertId);
+      }
+      
+      console.log('Alert acknowledged and cleared:', alertId);
     } catch (error) {
       console.error('Error acknowledging alert:', error);
+      // Even if backend fails, keep it removed from UI
     }
+  };
+
+  const handleClearAllAlerts = () => {
+    console.log('Clearing all alerts');
+    setAlerts([]);
   };
 
   const handleSystemCommand = (command: string) => {
@@ -256,7 +271,7 @@ function App() {
 
             {/* Right Column - Alerts & Stats */}
             <div className="space-y-6">
-              <AlertPanel alerts={alerts} onAcknowledge={handleAcknowledgeAlert} />
+              <AlertPanel alerts={alerts} onAcknowledge={handleAcknowledgeAlert} onClearAll={handleClearAllAlerts} />
               <SummaryStatsComponent stats={stats} />
               <SystemCommand onCommand={handleSystemCommand} />
             </div>

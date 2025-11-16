@@ -97,12 +97,12 @@ async def health():
 # Background worker for surveillance processing
 async def surveillance_worker():
     """
-    Background worker that processes camera feeds
+    Background worker with 1-minute analysis intervals to reduce noise
     """
     from agents import VisionAgent, ContextAgent, CommandAgent
     from api import manager
     from database import SessionLocal, Event, Detection, Alert, AlertSeverity
-    from datetime import datetime
+    from datetime import datetime, timedelta
     import base64
     import cv2
     import os
@@ -116,17 +116,25 @@ async def surveillance_worker():
     event_frames_dir = Path(__file__).parent / "event_frames"
     event_frames_dir.mkdir(exist_ok=True)
 
-    logger.info("Surveillance worker started")
+    logger.info("🎯 Surveillance worker started with 2-MINUTE summaries (immediate alerts >=60%)")
+
+    # 2-minute aggregation state
+    ANALYSIS_INTERVAL_SECONDS = 120  # 2 minutes for summary
+    minute_start_time = datetime.utcnow()
+    critical_events = []  # Store events for 2-min summary (non-immediate alerts)
 
     iteration = 0
     while True:
         try:
             iteration += 1
-            logger.info(f"[WORKER] Starting iteration {iteration}")
+            current_time = datetime.utcnow()
+            elapsed_seconds = (current_time - minute_start_time).total_seconds()
+            
+            logger.info(f"[WORKER] Iteration {iteration} - Elapsed: {int(elapsed_seconds)}s/{ANALYSIS_INTERVAL_SECONDS}s, Critical events: {len(critical_events)}")
 
             # Get active cameras
             active_camera_count = camera_service.get_active_camera_count()
-            logger.info(f"[WORKER] Active camera count: {active_camera_count}")
+            logger.debug(f"[WORKER] Active camera count: {active_camera_count}")
 
             if active_camera_count > 0:
                 logger.info(f"Processing {active_camera_count} active camera(s)")
@@ -191,8 +199,115 @@ async def surveillance_worker():
                                 "frame_base64": frame_base64,  # Include base64 for direct display
                                 "timestamp": datetime.utcnow().isoformat()
                             }
-                            logger.info(f"[WEBSOCKET] Analysis: significance={significance}, objects={detected_objects}, frame={frame_url}")
                             await manager.send_analysis_update(analysis_update)
+                            logger.debug(f"[LIVE FEED] Updated (significance={significance}%)")
+
+                            # Check for IMMEDIATE CRITICAL ALERTS - ANY EVENT CHANGE OR USER TASK >50%
+                            scene_text = analysis.get('scene_description', '').lower()
+                            activity_text = analysis.get('activity', '').lower()
+                            combined_text = scene_text + ' ' + activity_text
+                            
+                            # Critical keywords for immediate alert (always trigger)
+                            critical_keywords = ['weapon', 'gun', 'knife', 'violence', 'fight', 'attack', 
+                                                'threat', 'dangerous', 'hazard', 'fire', 'smoke', 'blood',
+                                                'injury', 'fall', 'accident', 'emergency', 'suspicious',
+                                                'intruder', 'break', 'damage', 'vandal', 'unusual', 'anomaly']
+                            
+                            has_dangerous_keyword = any(keyword in combined_text for keyword in critical_keywords)
+                            
+                            # Check if user has active tasks
+                            active_tasks = command_agent.get_active_tasks()
+                            user_task_active = len(active_tasks) > 0 if active_tasks else False
+                            
+                            # IMMEDIATE ALERT TRIGGERS (User requirement: >=60% for critical events):
+                            # 1. Dangerous keywords (always, any confidence)
+                            # 2. User task match with >=60% accuracy
+                            # 3. Critical events with >=60% significance
+                            should_send_immediate = (
+                                has_dangerous_keyword or  # Dangerous keywords (always)
+                                (user_task_active and significance >= 60) or  # User task >=60%
+                                (not user_task_active and significance >= 60)  # Critical event >=60%
+                            )
+                            
+                            if should_send_immediate:
+                                reason = []
+                                if has_dangerous_keyword:
+                                    reason.append("dangerous_keyword")
+                                if user_task_active and significance >= 60:
+                                    reason.append("user_task_match")
+                                if significance >= 60:
+                                    reason.append("critical_event")
+                                
+                                logger.info(f"🚨 IMMEDIATE CRITICAL ALERT: significance={significance}%, reasons={reason}")
+                                # Determine alert type based on what triggered it
+                                if has_dangerous_keyword:
+                                    alert_type_text = "⚠️ HAZARDOUS/DANGEROUS EVENT"
+                                    severity = "CRITICAL"
+                                elif user_task_active:
+                                    alert_type_text = "🎯 USER TASK DETECTED"
+                                    severity = "CRITICAL"
+                                else:
+                                    alert_type_text = "🔔 EVENT CHANGE DETECTED"
+                                    severity = "WARNING" if significance < 70 else "CRITICAL"
+                                
+                                alert_summary = f"""**🚨 IMMEDIATE ACTION REQUIRED** (Confidence: {significance}%)
+
+**{alert_type_text}** - Requires immediate review!
+
+**Scene:** {analysis.get('scene_description', 'No description')}
+
+**Activity:** {analysis.get('activity', 'Unknown activity')}
+
+**Objects Detected:** {', '.join(detected_objects) if detected_objects else 'None'}
+
+**Detection Details:** {len(detections_list)} objects identified
+**Time:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}
+**Camera:** {camera_id}
+**Context:** {context_summary[:150] if context_summary else 'No context'}
+
+**⚠️ ACTION REQUIRED:** Review this event immediately
+**Evidence Attached:** Full image and detailed analysis included
+**Alert Reason:** {'Dangerous activity' if has_dangerous_keyword else 'User task match' if user_task_active else 'Significant event change'}"""
+
+                                title = f"🚨 IMMEDIATE ACTION REQUIRED - Camera {camera_id}"
+
+                                # Send immediate alert
+                                immediate_alert_data = {
+                                    "id": f"immediate_{camera_id}_{int(datetime.utcnow().timestamp())}",
+                                    "severity": severity,
+                                    "title": title,
+                                    "message": alert_summary,
+                                    "camera_id": camera_id,
+                                    "timestamp": datetime.utcnow().isoformat(),
+                                    "significance": significance,
+                                    "frame_url": frame_url,
+                                    "frame_path": str(frame_path),
+                                    "frame_base64": frame_base64,
+                                    "detections": detections_list,
+                                    "detected_objects": detected_objects,
+                                    "alert_type": "immediate",
+                                    "is_read": False
+                                }
+
+                                await manager.send_alert(immediate_alert_data)
+                                logger.info(f"🚨 IMMEDIATE ALERT SENT: {severity} - {significance}% - {detected_objects}")
+
+                            # Don't collect for 2-minute summary if already sent immediate alert
+                            # This prevents duplicate notifications
+                            # Only collect events that didn't trigger immediate alerts
+                            elif not should_send_immediate and significance >= 50:
+                                critical_events.append({
+                                    'timestamp': current_time.isoformat(),
+                                    'analysis': analysis,
+                                    'significance': significance,
+                                    'detected_objects': detected_objects,
+                                    'detections_list': detections_list,
+                                    'frame_url': frame_url,
+                                    'frame_path': frame_path,
+                                    'frame_base64': frame_base64,
+                                    'context': context_summary
+                                })
+                                logger.info(f"✓ Event collected for 2-min summary (significance={significance}%)")
 
                             # Try to store event in database (optional - continue if fails)
                             try:
@@ -233,7 +348,7 @@ async def surveillance_worker():
                                     )
                                     db.add(detection)
 
-                                # Create alert if significant
+                                # Create alert if significant (this is for DB storage, not WS notification)
                                 if event.significance_score >= settings.WARNING_THRESHOLD:
                                     alert = Alert(
                                         event_id=event.id,
@@ -243,16 +358,6 @@ async def surveillance_worker():
                                     )
                                     db.add(alert)
                                     db.flush()
-
-                                    # Send alert via WebSocket
-                                    await manager.send_alert({
-                                        "id": alert.id,
-                                        "severity": alert.severity.value,
-                                        "title": alert.title,
-                                        "message": alert.message,
-                                        "camera_id": camera_id,
-                                        "timestamp": alert.timestamp.isoformat()
-                                    })
 
                                 db.commit()
                                 db.close()
@@ -286,8 +391,8 @@ async def surveillance_worker():
                                         task_result = await command_agent.analyze_with_context(
                                             task_id,
                                             {"camera_id": camera_id, "timestamp": datetime.utcnow().isoformat()},
-                                            analysis
-                                        )
+                                analysis
+                            )
 
                                         # Send task update if alert needed
                                         if task_result.get('alert_needed'):
@@ -300,7 +405,7 @@ async def surveillance_worker():
 
                                             await manager.send_system_message("task_alert", {
                                                 "task_id": task_id,
-                                                "camera_id": camera_id,
+                                "camera_id": camera_id,
                                                 "task_type": task_command.get('task_type'),
                                                 "target": task_command.get('target'),
                                                 "findings": task_result.get('findings'),
@@ -312,6 +417,76 @@ async def surveillance_worker():
                                         logger.debug(f"Task analysis error: {task_error}")
                         except Exception as task_check_error:
                             logger.debug(f"Error checking tasks: {task_check_error}")
+
+            # Check if 2 minutes have elapsed - send summary alert
+            if elapsed_seconds >= ANALYSIS_INTERVAL_SECONDS:
+                logger.info(f"⏰ 2-MINUTE INTERVAL COMPLETE - Analyzing {len(critical_events)} events")
+                
+                if critical_events:
+                    # Find most significant event
+                    most_significant = max(critical_events, key=lambda x: x['significance'])
+                    
+                    # Collect all unique objects from the minute
+                    all_objects = set()
+                    activities = []
+                    for event in critical_events:
+                        all_objects.update(event['detected_objects'])
+                        activity = event['analysis'].get('activity', '')
+                        if activity and activity not in activities:
+                            activities.append(activity)
+                    
+                    # Create comprehensive 2-minute summary
+                    alert_summary = f"""**2-Minute Activity Summary** (Peak Confidence: {most_significant['significance']}%)
+
+**Period:** {minute_start_time.strftime('%H:%M:%S')} - {current_time.strftime('%H:%M:%S')}
+
+**Most Significant Scene:** {most_significant['analysis'].get('scene_description', 'No description')}
+
+**Activities Detected:** {' → '.join(activities[:3]) if activities else 'No significant activity changes'}
+
+**All Objects Seen:** {', '.join(sorted(all_objects)) if all_objects else 'None'}
+
+**Events Recorded:** {len(critical_events)} detected in last 2 minutes
+**Camera:** {camera_id if 'camera_id' in locals() else 0}
+
+**Analysis:** This summary represents activities from the last 120 seconds."""
+
+                    # Determine severity
+                    if most_significant['significance'] >= 80:
+                        severity = "CRITICAL"
+                        title = f"🚨 Critical Activity Summary (2-min) - Camera {camera_id if 'camera_id' in locals() else 0}"
+                    else:
+                        severity = "WARNING"
+                        title = f"⚠️ Activity Summary (2-min) - Camera {camera_id if 'camera_id' in locals() else 0}"
+
+                    # Create ONE consolidated alert for the entire minute
+                    alert_data = {
+                        "id": f"summary_{int(current_time.timestamp())}",
+                        "severity": severity,
+                        "title": title,
+                        "message": alert_summary,
+                        "camera_id": camera_id if 'camera_id' in locals() else 0,
+                        "timestamp": current_time.isoformat(),
+                        "significance": most_significant['significance'],
+                        "frame_url": most_significant['frame_url'],
+                        "frame_path": str(most_significant['frame_path']),
+                        "frame_base64": most_significant['frame_base64'],
+                        "detections": most_significant['detections_list'],
+                        "detected_objects": list(all_objects),
+                        "event_count": len(critical_events),
+                        "is_read": False
+                    }
+
+                    # Send single alert for entire 2-minute period
+                    await manager.send_alert(alert_data)
+                    logger.info(f"📩 2-MINUTE SUMMARY SENT: {severity} - {len(critical_events)} events, max={most_significant['significance']}%")
+                else:
+                    logger.info(f"✓ 2-minute period complete - No events to summarize")
+                
+                # Reset for next 2-minute period
+                minute_start_time = current_time
+                critical_events = []
+                logger.info(f"🔄 Starting new 2-minute analysis period")
 
             # Wait before next iteration (based on FPS)
             await asyncio.sleep(1.0 / settings.CAMERA_FPS)

@@ -48,33 +48,56 @@ class CommandAgent:
             }
         )
 
-        # System prompt for command understanding
-        self.system_prompt = """You are an intelligent surveillance system command processor.
-Your role is to understand user commands and translate them into actionable surveillance tasks.
+        # System prompt for command understanding with improved interpretation
+        self.system_prompt = """You are an intelligent surveillance system command processor with advanced natural language understanding.
+Your role is to ACCURATELY understand user commands and translate them into precise, actionable surveillance tasks.
+
+CRITICAL: Pay close attention to:
+- Specific objects mentioned (scissors, nail cutter, phone, laptop, etc.)
+- Actions and activities (entering, leaving, picking up, holding, using)
+- Conditions (if/when/whenever/alert me if)
+- Context and intent
 
 You can perform the following tasks:
-1. OBJECT DETECTION - Detect specific objects (people, vehicles, animals, items)
+1. OBJECT DETECTION - Detect ANY specific objects (people, vehicles, animals, tools, items, devices)
 2. SURVEILLANCE MONITORING - Monitor for specific activities or behaviors
 3. SCENE ANALYSIS - Analyze and describe current scenes
 4. ALERT GENERATION - Create alerts based on specific conditions
 5. TRACKING - Track specific objects or people across cameras
 6. ANOMALY DETECTION - Identify unusual activities or patterns
 
-When you receive a command, respond with a JSON object:
+CRITICAL OUTPUT FORMAT - Respond ONLY with valid JSON (no markdown, no code blocks):
 {
   "task_type": "object_detection|surveillance|scene_analysis|alert|tracking|anomaly_detection",
-  "target": "what to look for (person, vehicle, specific object, activity)",
+  "target": "EXACT object/activity to look for",
   "parameters": {
-    "camera_ids": [list of camera IDs or "all"],
-    "duration": "how long to monitor (minutes) or 'continuous'",
-    "alert_threshold": "low|medium|high",
-    "specific_conditions": ["list of specific conditions to check"]
+    "camera_ids": ["all"],
+    "duration": "continuous",
+    "alert_threshold": "medium",
+    "specific_conditions": ["list of SPECIFIC conditions"],
+    "objects_to_detect": ["list ALL specific objects mentioned"]
   },
-  "confirmation": "Natural language confirmation of what will be done",
-  "understood_intent": "Your understanding of user's intent"
+  "confirmation": "Natural language confirmation",
+  "understood_intent": "Detailed explanation of what you understood"
 }
 
-Examples:
+EXAMPLES showing proper understanding:
+
+User: "alert me if you see scissors"
+Response: {
+  "task_type": "object_detection",
+  "target": "scissors",
+  "parameters": {
+    "camera_ids": ["all"],
+    "duration": "continuous",
+    "alert_threshold": "medium",
+    "specific_conditions": ["detect scissors in frame", "alert when scissors appear"],
+    "objects_to_detect": ["scissors"]
+  },
+  "confirmation": "I will continuously monitor all cameras and alert you immediately when scissors are detected",
+  "understood_intent": "User wants to be alerted when scissors appear in any camera view"
+}
+
 User: "Watch for any person entering the building"
 Response: {
   "task_type": "object_detection",
@@ -162,8 +185,14 @@ Always be clear, concise, and security-focused. Respond only with valid JSON."""
                     "understood_intent": user_command
                 }
             else:
-                # Parse response
+                # Parse response with better error handling
                 parsed_command = self._parse_command_response(response.text)
+                
+                # Log parsed command for debugging
+                from loguru import logger
+                logger.info(f"[COMMAND] Parsed task_type: {parsed_command.get('task_type')}")
+                logger.info(f"[COMMAND] Parsed target: {parsed_command.get('target')}")
+                logger.info(f"[COMMAND] Parsed objects_to_detect: {parsed_command.get('parameters', {}).get('objects_to_detect')}")
 
             parsed_command['original_command'] = user_command
             parsed_command['timestamp'] = datetime.utcnow().isoformat()
@@ -172,7 +201,7 @@ Always be clear, concise, and security-focused. Respond only with valid JSON."""
             task_id = f"task_{datetime.utcnow().timestamp()}"
             parsed_command['task_id'] = task_id
 
-            # Store active task
+            # Store active task with command details
             self.active_tasks[task_id] = {
                 "command": parsed_command,
                 "status": "active",
