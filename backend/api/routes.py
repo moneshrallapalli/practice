@@ -15,7 +15,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import get_db, Camera, Event, Detection, Alert, ContextPattern, AlertSeverity
 from api.websocket import manager
-from agents import VisionAgent, ContextAgent
+from agents import VisionAgent, ContextAgent, CommandAgent
 from services import camera_service
 from config import settings
 
@@ -26,6 +26,7 @@ ws_router = APIRouter()
 # Initialize agents
 vision_agent = VisionAgent()
 context_agent = ContextAgent()
+command_agent = CommandAgent()
 
 
 # WebSocket endpoints
@@ -346,3 +347,85 @@ async def handle_system_command(command: str, params: dict):
             "message": "This is a test alert",
             "camera_id": params.get("camera_id", 1)
         })
+
+    else:
+        # Process as natural language command with Gemini
+        await process_user_command(command, params)
+
+
+async def process_user_command(command: str, params: dict):
+    """
+    Process natural language user command with Gemini
+
+    Args:
+        command: User's natural language command
+        params: Additional parameters
+    """
+    try:
+        # Get current context
+        active_camera_ids = list(camera_service.active_cameras.keys())
+        context = {
+            "active_cameras": active_camera_ids,
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        # Process command with CommandAgent
+        result = await command_agent.process_command(command, context)
+
+        # Send confirmation to user
+        await manager.send_system_message("command_processed", {
+            "original_command": command,
+            "task_id": result.get('task_id'),
+            "task_type": result.get('task_type'),
+            "confirmation": result.get('confirmation'),
+            "understood_intent": result.get('understood_intent'),
+            "parameters": result.get('parameters')
+        })
+
+        # Execute task based on type
+        task_type = result.get('task_type')
+
+        if task_type in ['object_detection', 'surveillance', 'scene_analysis', 'anomaly_detection', 'tracking']:
+            # Start monitoring task
+            await start_monitoring_task(result)
+
+        elif task_type == 'alert':
+            # Create immediate alert
+            await manager.send_alert({
+                "severity": "INFO",
+                "title": "Command Alert",
+                "message": result.get('confirmation'),
+                "camera_id": params.get("camera_id", 1)
+            })
+
+    except Exception as e:
+        await manager.send_system_message("command_error", {
+            "error": str(e),
+            "message": f"Failed to process command: {str(e)}"
+        })
+
+
+async def start_monitoring_task(task_command: dict):
+    """
+    Start a monitoring task based on parsed command
+
+    Args:
+        task_command: Parsed command from CommandAgent
+    """
+    task_id = task_command.get('task_id')
+    camera_ids = task_command.get('parameters', {}).get('camera_ids', ['all'])
+
+    # Determine which cameras to monitor
+    if camera_ids == ['all'] or 'all' in camera_ids:
+        target_cameras = list(camera_service.active_cameras.keys())
+    else:
+        target_cameras = [int(cid) for cid in camera_ids if isinstance(cid, (int, str))]
+
+    # Send status update
+    await manager.send_system_message("task_started", {
+        "task_id": task_id,
+        "task_type": task_command.get('task_type'),
+        "target": task_command.get('target'),
+        "cameras": target_cameras,
+        "message": f"Started monitoring on {len(target_cameras)} camera(s)"
+    })

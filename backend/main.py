@@ -29,7 +29,8 @@ async def lifespan(app: FastAPI):
     logger.info("Database initialized")
 
     # Start background tasks
-    # asyncio.create_task(surveillance_worker())
+    asyncio.create_task(surveillance_worker())
+    logger.info("Surveillance worker started")
 
     yield
 
@@ -88,13 +89,16 @@ async def surveillance_worker():
     """
     Background worker that processes camera feeds
     """
-    from agents import VisionAgent, ContextAgent
+    from agents import VisionAgent, ContextAgent, CommandAgent
     from api import manager
     from database import SessionLocal, Event, Detection, Alert, AlertSeverity
+    from datetime import datetime
     import base64
+    import cv2
 
     vision_agent = VisionAgent()
     context_agent = ContextAgent()
+    command_agent = CommandAgent()
 
     logger.info("Surveillance worker started")
 
@@ -199,6 +203,44 @@ async def surveillance_worker():
                                 "detections": len(analysis.get('detections', [])),
                                 "context": context_summary
                             })
+
+                            # Check active tasks and analyze in context
+                            active_tasks = command_agent.get_active_tasks()
+                            for task_id, task_data in active_tasks.items():
+                                task_command = task_data.get('command', {})
+                                task_params = task_command.get('parameters', {})
+                                target_cameras = task_params.get('camera_ids', ['all'])
+
+                                # Check if this camera is relevant to the task
+                                if target_cameras == ['all'] or 'all' in target_cameras or camera_id in target_cameras:
+                                    # Analyze in context of task
+                                    task_result = await command_agent.analyze_with_context(
+                                        task_id,
+                                        {"camera_id": camera_id, "timestamp": datetime.utcnow().isoformat()},
+                                        analysis
+                                    )
+
+                                    # Send task update if alert needed
+                                    if task_result.get('alert_needed'):
+                                        await manager.send_system_message("task_alert", {
+                                            "task_id": task_id,
+                                            "camera_id": camera_id,
+                                            "task_type": task_command.get('task_type'),
+                                            "target": task_command.get('target'),
+                                            "findings": task_result.get('findings'),
+                                            "alert_message": task_result.get('alert_message'),
+                                            "timestamp": datetime.utcnow().isoformat()
+                                        })
+
+                                        # Also create an alert
+                                        task_alert = Alert(
+                                            event_id=event.id,
+                                            severity=AlertSeverity.WARNING,
+                                            title=f"Task Alert: {task_command.get('target', 'Unknown')}",
+                                            message=task_result.get('alert_message', 'Task condition met')
+                                        )
+                                        db.add(task_alert)
+                                        db.commit()
 
                         except Exception as e:
                             db.rollback()
