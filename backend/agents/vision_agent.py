@@ -38,7 +38,7 @@ class VisionAgent:
 
         # Initialize Gemini model
         self.model = genai.GenerativeModel(
-            model_name='gemini-1.5-flash',  # Use flash for real-time processing
+            model_name='gemini-2.5-flash',  # Use flash for real-time processing
             generation_config=GenerationConfig(
                 temperature=0.4,
                 top_p=0.95,

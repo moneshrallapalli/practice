@@ -32,7 +32,7 @@ class CommandAgent:
 
         # Initialize Gemini model for command processing
         self.model = genai.GenerativeModel(
-            model_name='gemini-1.5-flash',
+            model_name='gemini-2.5-flash',
             generation_config=GenerationConfig(
                 temperature=0.3,  # Lower temperature for more consistent command parsing
                 top_p=0.95,
