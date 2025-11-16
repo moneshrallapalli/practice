@@ -6,11 +6,20 @@ An intelligent surveillance system powered by Google Gemini Live API with real-t
 
 ### Core Capabilities
 - **🤖 AI Vision Agent**: Real-time video analysis using Gemini Live API
+- **💬 AI Command Center**: Natural language interface for surveillance control - **NEW!**
 - **🧠 Context Agent**: Semantic search and pattern recognition with ChromaDB
 - **📊 Real-time Dashboard**: Live feeds, alerts, and scene narration
 - **🔍 Anomaly Detection**: Identifies unusual patterns vs normal behavior
 - **📝 Historical Context**: Track object appearances over time
 - **⚡ WebSocket Integration**: Real-time updates for all components
+
+### 🆕 AI Command Center (NEW!)
+Control your surveillance system using natural language! Simply type what you want:
+- "Watch for people entering the building"
+- "Alert me if you see any vehicles"
+- "Monitor for suspicious activity"
+
+The system understands your intent, confirms what it will do, and executes tasks in real-time. See [AI_COMMAND_USAGE.md](AI_COMMAND_USAGE.md) for detailed guide.
 
 ### Technology Stack
 
