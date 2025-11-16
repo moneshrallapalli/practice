@@ -30,68 +30,63 @@ An intelligent surveillance system powered by Google Gemini Live API with real-t
 
 ## 🚀 Quick Start
 
-### Prerequisites
-- Python 3.9+
-- Node.js 18+
-- PostgreSQL 14+
-- Redis 7+
-- Google Gemini API key
+### One-Command Start (Recommended)
 
-### 1. Clone Repository
+**Linux/Mac:**
 ```bash
-git clone <repository-url>
-cd practice
+# 1. Add your Gemini API key to backend/.env
+cp backend/.env.example backend/.env
+# Edit backend/.env and add GEMINI_API_KEY=your_key_here
+
+# 2. Start everything
+./start.sh
+
+# Dashboard opens automatically at http://localhost:3000
 ```
 
-### 2. Backend Setup
+**Windows:**
+```batch
+REM 1. Add your Gemini API key to backend\.env
+copy backend\.env.example backend\.env
+REM Edit backend\.env and add GEMINI_API_KEY=your_key_here
 
-```bash
-cd backend
+REM 2. Start everything
+start.bat
 
-# Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Configure environment
-cp .env.example .env
-# Edit .env and add your Gemini API key and database credentials
-
-# Initialize database
-python init_db.py
+REM Dashboard opens automatically at http://localhost:3000
 ```
 
-### 3. Frontend Setup
-
+**Stop the system:**
 ```bash
-cd frontend
-
-# Install dependencies
-npm install
-
-# Configure environment
-cp .env.example .env
-# Edit .env if needed (default API URL is http://localhost:8000/api)
+./stop.sh       # Linux/Mac
+stop.bat        # Windows
 ```
 
-### 4. Start Services
+### Docker Start (Also Easy)
 
-**Terminal 1 - Start Backend:**
 ```bash
-cd backend
-source venv/bin/activate
-python main.py
+# 1. Add your Gemini API key
+cp backend/.env.example backend/.env
+# Edit backend/.env and add GEMINI_API_KEY=your_key_here
+
+# 2. Start with Docker
+./start-docker.sh
+
+# Stop with Docker
+./stop-docker.sh
 ```
 
-**Terminal 2 - Start Frontend:**
-```bash
-cd frontend
-npm start
-```
+### What the Start Script Does
+- ✅ Checks all prerequisites (Python, Node.js, databases)
+- ✅ Creates virtual environment (first run)
+- ✅ Installs dependencies automatically
+- ✅ Initializes database (first run)
+- ✅ Starts PostgreSQL and Redis
+- ✅ Starts backend server (port 8000)
+- ✅ Starts frontend server (port 3000)
+- ✅ Opens dashboard in your browser
 
-Access the dashboard at: http://localhost:3000
+**See [QUICK_START.md](QUICK_START.md) for detailed instructions**
 
 ## 📦 Docker Setup (Recommended)
 
