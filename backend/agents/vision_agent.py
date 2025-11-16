@@ -129,6 +129,10 @@ Focus on security-relevant events and anomalies. Be concise but thorough."""
             return analysis
 
         except Exception as e:
+            import traceback
+            from loguru import logger
+            logger.error(f"Vision Agent error for camera {camera_id}: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return {
                 "error": str(e),
                 "camera_id": camera_id,

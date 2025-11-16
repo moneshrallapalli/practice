@@ -24,9 +24,13 @@ async def lifespan(app: FastAPI):
     # Startup
     logger.info("Starting SentinTinel Surveillance System...")
 
-    # Initialize database
-    init_db()
-    logger.info("Database initialized")
+    # Initialize database (optional - continue if fails)
+    try:
+        init_db()
+        logger.info("Database initialized")
+    except Exception as e:
+        logger.warning(f"Database initialization failed (continuing without database): {e}")
+        logger.info("Some features requiring database access will not be available")
 
     # Start background tasks
     asyncio.create_task(surveillance_worker())
@@ -102,90 +106,42 @@ async def surveillance_worker():
 
     logger.info("Surveillance worker started")
 
+    iteration = 0
     while True:
         try:
+            iteration += 1
+            logger.info(f"[WORKER] Starting iteration {iteration}")
+
             # Get active cameras
             active_camera_count = camera_service.get_active_camera_count()
+            logger.info(f"[WORKER] Active camera count: {active_camera_count}")
 
             if active_camera_count > 0:
+                logger.info(f"Processing {active_camera_count} active camera(s)")
                 # Process each active camera
                 for camera_id in list(camera_service.active_cameras.keys()):
                     # Capture frame
                     frame = await camera_service.capture_frame(camera_id)
 
+                    if frame is None:
+                        logger.debug(f"No frame captured from camera {camera_id}")
+                        continue
+
                     if frame is not None:
-                        # Analyze frame with Vision Agent
-                        analysis = await vision_agent.analyze_frame(frame, camera_id)
-
-                        # Get context from Context Agent
-                        context_summary = await context_agent.get_context_for_event(
-                            analysis.get('scene_description', ''),
-                            datetime.utcnow(),
-                            camera_id
-                        )
-
-                        # Store event in database
-                        db = SessionLocal()
+                        logger.info(f"Processing frame from camera {camera_id}, shape: {frame.shape}")
                         try:
-                            # Create event
-                            event = Event(
-                                camera_id=camera_id,
-                                event_type="scene_analysis",
-                                description=analysis.get('activity', ''),
-                                scene_description=analysis.get('scene_description', ''),
-                                significance_score=vision_agent.calculate_significance_score(analysis),
-                                severity=vision_agent.determine_alert_severity(analysis),
-                                context_summary=context_summary,
-                                event_metadata=analysis
+                            # Analyze frame with Vision Agent
+                            analysis = await vision_agent.analyze_frame(frame, camera_id)
+                            logger.info(f"[ANALYSIS] Camera {camera_id} - Scene: {analysis.get('scene_description', 'N/A')[:100]}, Error: {analysis.get('error', 'None')}")
+
+                            # Get context from Context Agent
+                            context_summary = await context_agent.get_context_for_event(
+                                analysis.get('scene_description', ''),
+                                datetime.utcnow(),
+                                camera_id
                             )
 
-                            db.add(event)
-                            db.flush()  # Get event ID
-
-                            # Store in ChromaDB
-                            embedding_id = await context_agent.store_scene_description(
-                                event.id,
-                                camera_id,
-                                event.timestamp,
-                                event.scene_description,
-                                {"significance": event.significance_score}
-                            )
-
-                            event.embedding_id = embedding_id
-
-                            # Create detections
-                            for det in vision_agent.extract_detections_for_storage(analysis):
-                                detection = Detection(
-                                    event_id=event.id,
-                                    camera_id=camera_id,
-                                    **det
-                                )
-                                db.add(detection)
-
-                            # Create alert if significant
-                            if event.significance_score >= settings.WARNING_THRESHOLD:
-                                alert = Alert(
-                                    event_id=event.id,
-                                    severity=event.severity,
-                                    title=f"{event.severity.value} Alert - Camera {camera_id}",
-                                    message=event.scene_description
-                                )
-                                db.add(alert)
-                                db.flush()
-
-                                # Send alert via WebSocket
-                                await manager.send_alert({
-                                    "id": alert.id,
-                                    "severity": alert.severity.value,
-                                    "title": alert.title,
-                                    "message": alert.message,
-                                    "camera_id": camera_id,
-                                    "timestamp": alert.timestamp.isoformat()
-                                })
-
-                            db.commit()
-
-                            # Send live feed update via WebSocket
+                            # Send live feed update via WebSocket (works without database)
                             _, buffer = cv2.imencode('.jpg', frame)
                             frame_base64 = base64.b64encode(buffer).decode('utf-8')
 
@@ -195,16 +151,94 @@ async def surveillance_worker():
                                 analysis
                             )
 
-                            # Send analysis update
-                            await manager.send_analysis_update({
+                            # Send analysis update (works without database)
+                            analysis_update = {
                                 "camera_id": camera_id,
                                 "scene_description": analysis.get('scene_description', ''),
-                                "significance": event.significance_score,
+                                "significance": vision_agent.calculate_significance_score(analysis),
                                 "detections": len(analysis.get('detections', [])),
                                 "context": context_summary
-                            })
+                            }
+                            logger.info(f"[WEBSOCKET] Sending analysis update: significance={analysis_update['significance']}, detections={analysis_update['detections']}")
+                            await manager.send_analysis_update(analysis_update)
 
-                            # Check active tasks and analyze in context
+                            # Try to store event in database (optional - continue if fails)
+                            try:
+                                db = SessionLocal()
+                                
+                                # Create event
+                                event = Event(
+                                    camera_id=camera_id,
+                                    event_type="scene_analysis",
+                                    description=analysis.get('activity', ''),
+                                    scene_description=analysis.get('scene_description', ''),
+                                    significance_score=vision_agent.calculate_significance_score(analysis),
+                                    severity=vision_agent.determine_alert_severity(analysis),
+                                    context_summary=context_summary,
+                                    event_metadata=analysis
+                                )
+
+                                db.add(event)
+                                db.flush()  # Get event ID
+
+                                # Store in ChromaDB
+                                embedding_id = await context_agent.store_scene_description(
+                                    event.id,
+                                    camera_id,
+                                    event.timestamp,
+                                    event.scene_description,
+                                    {"significance": event.significance_score}
+                                )
+
+                                event.embedding_id = embedding_id
+
+                                # Create detections
+                                for det in vision_agent.extract_detections_for_storage(analysis):
+                                    detection = Detection(
+                                        event_id=event.id,
+                                        camera_id=camera_id,
+                                        **det
+                                    )
+                                    db.add(detection)
+
+                                # Create alert if significant
+                                if event.significance_score >= settings.WARNING_THRESHOLD:
+                                    alert = Alert(
+                                        event_id=event.id,
+                                        severity=event.severity,
+                                        title=f"{event.severity.value} Alert - Camera {camera_id}",
+                                        message=event.scene_description
+                                    )
+                                    db.add(alert)
+                                    db.flush()
+
+                                    # Send alert via WebSocket
+                                    await manager.send_alert({
+                                        "id": alert.id,
+                                        "severity": alert.severity.value,
+                                        "title": alert.title,
+                                        "message": alert.message,
+                                        "camera_id": camera_id,
+                                        "timestamp": alert.timestamp.isoformat()
+                                    })
+
+                                db.commit()
+                                db.close()
+                            except Exception as db_error:
+                                logger.warning(f"Failed to save event to database (continuing without DB): {db_error}")
+                                try:
+                                    if 'db' in locals():
+                                        db.rollback()
+                                        db.close()
+                                except:
+                                    pass
+                        except Exception as frame_error:
+                            logger.error(f"Error processing frame from camera {camera_id}: {frame_error}")
+                            continue
+
+                    # Check active tasks and analyze in context (for successfully processed frames)
+                    if frame is not None:
+                        try:
                             active_tasks = command_agent.get_active_tasks()
                             for task_id, task_data in active_tasks.items():
                                 task_command = task_data.get('command', {})
@@ -213,40 +247,31 @@ async def surveillance_worker():
 
                                 # Check if this camera is relevant to the task
                                 if target_cameras == ['all'] or 'all' in target_cameras or camera_id in target_cameras:
-                                    # Analyze in context of task
-                                    task_result = await command_agent.analyze_with_context(
-                                        task_id,
-                                        {"camera_id": camera_id, "timestamp": datetime.utcnow().isoformat()},
-                                        analysis
-                                    )
-
-                                    # Send task update if alert needed
-                                    if task_result.get('alert_needed'):
-                                        await manager.send_system_message("task_alert", {
-                                            "task_id": task_id,
-                                            "camera_id": camera_id,
-                                            "task_type": task_command.get('task_type'),
-                                            "target": task_command.get('target'),
-                                            "findings": task_result.get('findings'),
-                                            "alert_message": task_result.get('alert_message'),
-                                            "timestamp": datetime.utcnow().isoformat()
-                                        })
-
-                                        # Also create an alert
-                                        task_alert = Alert(
-                                            event_id=event.id,
-                                            severity=AlertSeverity.WARNING,
-                                            title=f"Task Alert: {task_command.get('target', 'Unknown')}",
-                                            message=task_result.get('alert_message', 'Task condition met')
+                                    # Get analysis if we have it
+                                    try:
+                                        analysis = await vision_agent.analyze_frame(frame, camera_id)
+                                        # Analyze in context of task
+                                        task_result = await command_agent.analyze_with_context(
+                                            task_id,
+                                            {"camera_id": camera_id, "timestamp": datetime.utcnow().isoformat()},
+                                            analysis
                                         )
-                                        db.add(task_alert)
-                                        db.commit()
 
-                        except Exception as e:
-                            db.rollback()
-                            logger.error(f"Error storing event: {e}")
-                        finally:
-                            db.close()
+                                        # Send task update if alert needed
+                                        if task_result.get('alert_needed'):
+                                            await manager.send_system_message("task_alert", {
+                                                "task_id": task_id,
+                                                "camera_id": camera_id,
+                                                "task_type": task_command.get('task_type'),
+                                                "target": task_command.get('target'),
+                                                "findings": task_result.get('findings'),
+                                                "alert_message": task_result.get('alert_message'),
+                                                "timestamp": datetime.utcnow().isoformat()
+                                            })
+                                    except Exception as task_error:
+                                        logger.debug(f"Task analysis error: {task_error}")
+                        except Exception as task_check_error:
+                            logger.debug(f"Error checking tasks: {task_check_error}")
 
             # Wait before next iteration (based on FPS)
             await asyncio.sleep(1.0 / settings.CAMERA_FPS)

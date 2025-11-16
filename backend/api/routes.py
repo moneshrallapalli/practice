@@ -429,3 +429,80 @@ async def start_monitoring_task(task_command: dict):
         "cameras": target_cameras,
         "message": f"Started monitoring on {len(target_cameras)} camera(s)"
     })
+
+
+@router.post("/test/camera/init")
+async def test_init_camera(camera_id: int = 0, source: int = 0):
+    """
+    Test endpoint to initialize a camera without database
+    Useful for testing with webcam
+    """
+    try:
+        success = await camera_service.initialize_camera(
+            camera_id=camera_id,
+            source=source,
+            fps=2,
+            resolution=(1280, 720)
+        )
+
+        if success:
+            # Get camera info
+            info = await camera_service.get_camera_info(camera_id)
+            return {
+                "status": "success",
+                "message": f"Camera {camera_id} initialized successfully",
+                "camera_info": info,
+                "active_cameras": camera_service.get_active_camera_count()
+            }
+        else:
+            raise HTTPException(status_code=500, detail="Failed to initialize camera")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/test/camera/stop")
+async def test_stop_camera(camera_id: int = 0):
+    """
+    Test endpoint to stop a camera without database
+    """
+    try:
+        success = await camera_service.stop_camera(camera_id)
+
+        if success:
+            return {
+                "status": "success",
+                "message": f"Camera {camera_id} stopped successfully",
+                "active_cameras": camera_service.get_active_camera_count()
+            }
+        else:
+            raise HTTPException(status_code=404, detail="Camera not found")
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/test/camera/status")
+async def test_camera_status():
+    """
+    Test endpoint to check camera status without database
+    """
+    try:
+        active_count = camera_service.get_active_camera_count()
+        active_cameras = list(camera_service.active_cameras.keys())
+
+        camera_infos = []
+        for cam_id in active_cameras:
+            info = await camera_service.get_camera_info(cam_id)
+            if info:
+                camera_infos.append(info)
+
+        return {
+            "status": "success",
+            "active_count": active_count,
+            "active_camera_ids": active_cameras,
+            "cameras": camera_infos
+        }
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
