@@ -59,7 +59,7 @@ class Event(Base):
     scene_description = Column(Text)  # Gemini's scene analysis
     significance_score = Column(Integer, default=0)  # 0-100
     severity = Column(SQLEnum(AlertSeverity), default=AlertSeverity.INFO)
-    metadata = Column(JSON)  # Additional event data
+    event_metadata = Column(JSON)  # Additional event data
     embedding_id = Column(String(255), index=True)  # ChromaDB reference
     context_summary = Column(Text)  # Historical context from ChromaDB
     is_anomaly = Column(Boolean, default=False)
@@ -107,7 +107,7 @@ class Alert(Base):
     is_dismissed = Column(Boolean, default=False)
     acknowledged_at = Column(DateTime, nullable=True)
     response_time_seconds = Column(Integer, nullable=True)
-    metadata = Column(JSON)
+    alert_metadata = Column(JSON)
 
     # Relationships
     event = relationship("Event", back_populates="alerts")
@@ -125,7 +125,7 @@ class ContextPattern(Base):
     frequency = Column(Integer, default=1)  # How often this pattern occurs
     time_range_start = Column(DateTime, nullable=True)
     time_range_end = Column(DateTime, nullable=True)
-    metadata = Column(JSON)
+    pattern_metadata = Column(JSON)
     embedding_ids = Column(JSON)  # Related ChromaDB embeddings
     created_at = Column(DateTime, default=datetime.utcnow)
     last_seen = Column(DateTime, default=datetime.utcnow)
@@ -141,5 +141,5 @@ class SystemLog(Base):
     log_level = Column(String(20))  # DEBUG, INFO, WARNING, ERROR, CRITICAL
     component = Column(String(100))  # vision_agent, context_agent, api, etc.
     message = Column(Text)
-    metadata = Column(JSON)
+    log_metadata = Column(JSON)
     created_at = Column(DateTime, default=datetime.utcnow)

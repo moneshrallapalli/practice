@@ -12,7 +12,7 @@ from .models import (
     AlertSeverity,
     DetectionStatus
 )
-from .database import get_db, init_db, engine
+from .database import get_db, init_db, engine, SessionLocal
 
 __all__ = [
     "Base",
@@ -26,5 +26,6 @@ __all__ = [
     "DetectionStatus",
     "get_db",
     "init_db",
-    "engine"
+    "engine",
+    "SessionLocal"
 ]

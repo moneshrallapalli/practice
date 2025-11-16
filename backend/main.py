@@ -132,7 +132,7 @@ async def surveillance_worker():
                                 significance_score=vision_agent.calculate_significance_score(analysis),
                                 severity=vision_agent.determine_alert_severity(analysis),
                                 context_summary=context_summary,
-                                metadata=analysis
+                                event_metadata=analysis
                             )
 
                             db.add(event)

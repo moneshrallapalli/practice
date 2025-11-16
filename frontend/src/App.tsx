@@ -8,7 +8,7 @@ import wsService from './services/websocket';
 import LiveFeedGrid from './components/LiveFeedGrid';
 import AlertPanel from './components/AlertPanel';
 import SceneNarration from './components/SceneNarration';
-import SummaryStats from './components/SummaryStats';
+import SummaryStatsComponent from './components/SummaryStats';
 import SystemCommand from './components/SystemCommand';
 
 interface NarrationEntry {
@@ -257,7 +257,7 @@ function App() {
             {/* Right Column - Alerts & Stats */}
             <div className="space-y-6">
               <AlertPanel alerts={alerts} onAcknowledge={handleAcknowledgeAlert} />
-              <SummaryStats stats={stats} />
+              <SummaryStatsComponent stats={stats} />
               <SystemCommand onCommand={handleSystemCommand} />
             </div>
           </div>
@@ -280,7 +280,7 @@ function App() {
 
         {activeTab === 'summary' && (
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-            <SummaryStats stats={stats} />
+            <SummaryStatsComponent stats={stats} />
             <SceneNarration narrations={narrations} />
           </div>
         )}
