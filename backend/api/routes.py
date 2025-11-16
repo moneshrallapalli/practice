@@ -5,6 +5,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, HTTPExce
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime, timedelta
+from loguru import logger
 import base64
 import cv2
 import numpy as np
@@ -108,8 +109,25 @@ async def get_cameras(db: Session = Depends(get_db)):
     """
     Get all cameras
     """
-    cameras = db.query(Camera).all()
-    return cameras
+    try:
+        cameras = db.query(Camera).all()
+        return cameras
+    except Exception as e:
+        # If database is not available, return empty list or active cameras from service
+        from loguru import logger
+        logger.warning(f"Database not available for /cameras endpoint: {e}")
+        # Return minimal camera info from camera service if any are active
+        active_cameras = []
+        for cam_id in camera_service.active_cameras.keys():
+            active_cameras.append({
+                "id": cam_id,
+                "name": f"Camera {cam_id}",
+                "location": "Unknown",
+                "stream_url": str(cam_id),
+                "is_active": True,
+                "fps": 2
+            })
+        return active_cameras
 
 
 @router.post("/cameras")
@@ -141,21 +159,41 @@ async def start_camera(camera_id: int, db: Session = Depends(get_db)):
     """
     Start a camera feed
     """
-    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    camera = None
+    fps = 2
+    stream_url = camera_id
 
-    if not camera:
-        raise HTTPException(status_code=404, detail="Camera not found")
+    try:
+        camera = db.query(Camera).filter(Camera.id == camera_id).first()
 
-    # Initialize camera
+        if not camera:
+            raise HTTPException(status_code=404, detail="Camera not found")
+
+        fps = camera.fps
+        stream_url = camera.stream_url or camera_id
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        # If database is not available, try to start camera directly
+        from loguru import logger
+        logger.warning(f"Database not available, starting camera {camera_id} directly: {e}")
+
+    # Initialize camera (works with or without database)
     success = await camera_service.initialize_camera(
         camera_id,
-        camera.stream_url or camera_id,  # Use stream_url or camera index
-        fps=camera.fps
+        stream_url,
+        fps=fps
     )
 
     if success:
-        camera.is_active = True
-        db.commit()
+        # Update database if available
+        if camera is not None:
+            try:
+                camera.is_active = True
+                db.commit()
+            except:
+                pass  # DB update failed, but camera started
         return {"status": "started", "camera_id": camera_id}
     else:
         raise HTTPException(status_code=500, detail="Failed to start camera")
@@ -166,14 +204,30 @@ async def stop_camera(camera_id: int, db: Session = Depends(get_db)):
     """
     Stop a camera feed
     """
-    camera = db.query(Camera).filter(Camera.id == camera_id).first()
+    camera = None
 
-    if not camera:
-        raise HTTPException(status_code=404, detail="Camera not found")
+    try:
+        camera = db.query(Camera).filter(Camera.id == camera_id).first()
 
+        if not camera:
+            raise HTTPException(status_code=404, detail="Camera not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        # If database is not available, proceed with stopping
+        from loguru import logger
+        logger.warning(f"Database not available, stopping camera {camera_id} directly: {e}")
+
+    # Stop camera (works with or without database)
     await camera_service.stop_camera(camera_id)
-    camera.is_active = False
-    db.commit()
+
+    # Update database if available
+    if camera is not None:
+        try:
+            camera.is_active = False
+            db.commit()
+        except:
+            pass  # DB update failed, but camera stopped
 
     return {"status": "stopped", "camera_id": camera_id}
 
@@ -215,15 +269,20 @@ async def get_alerts(
     """
     Get alerts with filtering
     """
-    query = db.query(Alert)
+    try:
+        query = db.query(Alert)
 
-    if is_read is not None:
-        query = query.filter(Alert.is_read == is_read)
-    if severity:
-        query = query.filter(Alert.severity == severity)
+        if is_read is not None:
+            query = query.filter(Alert.is_read == is_read)
+        if severity:
+            query = query.filter(Alert.severity == severity)
 
-    alerts = query.order_by(Alert.timestamp.desc()).limit(limit).all()
-    return alerts
+        alerts = query.order_by(Alert.timestamp.desc()).limit(limit).all()
+        return alerts
+    except Exception as e:
+        from loguru import logger
+        logger.warning(f"Database not available for alerts: {e}")
+        return []  # Return empty list if database not available
 
 
 @router.post("/alerts/{alert_id}/acknowledge")
@@ -256,42 +315,57 @@ async def get_summary_stats(
     """
     Get summary statistics
     """
-    since = datetime.utcnow() - timedelta(hours=hours)
+    try:
+        since = datetime.utcnow() - timedelta(hours=hours)
 
-    total_events = db.query(Event).filter(Event.timestamp >= since).count()
-    critical_alerts = db.query(Alert).filter(
-        Alert.timestamp >= since,
-        Alert.severity == AlertSeverity.CRITICAL
-    ).count()
-    warning_alerts = db.query(Alert).filter(
-        Alert.timestamp >= since,
-        Alert.severity == AlertSeverity.WARNING
-    ).count()
+        total_events = db.query(Event).filter(Event.timestamp >= since).count()
+        critical_alerts = db.query(Alert).filter(
+            Alert.timestamp >= since,
+            Alert.severity == AlertSeverity.CRITICAL
+        ).count()
+        warning_alerts = db.query(Alert).filter(
+            Alert.timestamp >= since,
+            Alert.severity == AlertSeverity.WARNING
+        ).count()
 
-    # Average response time
-    acknowledged_alerts = db.query(Alert).filter(
-        Alert.timestamp >= since,
-        Alert.acknowledged_at.isnot(None)
-    ).all()
+        # Average response time
+        acknowledged_alerts = db.query(Alert).filter(
+            Alert.timestamp >= since,
+            Alert.acknowledged_at.isnot(None)
+        ).all()
 
-    avg_response_time = 0
-    if acknowledged_alerts:
-        total_response = sum(a.response_time_seconds for a in acknowledged_alerts if a.response_time_seconds)
-        avg_response_time = total_response / len(acknowledged_alerts) if acknowledged_alerts else 0
+        avg_response_time = 0
+        if acknowledged_alerts:
+            total_response = sum(a.response_time_seconds for a in acknowledged_alerts if a.response_time_seconds)
+            avg_response_time = total_response / len(acknowledged_alerts) if acknowledged_alerts else 0
 
-    # Get ChromaDB stats
-    chroma_stats = context_agent.get_statistics()
+        # Get ChromaDB stats
+        chroma_stats = context_agent.get_statistics()
 
-    return {
-        "period_hours": hours,
-        "total_events": total_events,
-        "critical_alerts": critical_alerts,
-        "warning_alerts": warning_alerts,
-        "info_alerts": total_events - critical_alerts - warning_alerts,
-        "avg_response_time_seconds": int(avg_response_time),
-        "active_cameras": camera_service.get_active_camera_count(),
-        "context_stats": chroma_stats
-    }
+        return {
+            "period_hours": hours,
+            "total_events": total_events,
+            "critical_alerts": critical_alerts,
+            "warning_alerts": warning_alerts,
+            "info_alerts": total_events - critical_alerts - warning_alerts,
+            "avg_response_time_seconds": int(avg_response_time),
+            "active_cameras": camera_service.get_active_camera_count(),
+            "context_stats": chroma_stats
+        }
+    except Exception as e:
+        # If database is not available, return minimal stats
+        from loguru import logger
+        logger.warning(f"Database not available for stats, returning minimal data: {e}")
+        return {
+            "period_hours": hours,
+            "total_events": 0,
+            "critical_alerts": 0,
+            "warning_alerts": 0,
+            "info_alerts": 0,
+            "avg_response_time_seconds": 0,
+            "active_cameras": camera_service.get_active_camera_count(),
+            "context_stats": context_agent.get_statistics()
+        }
 
 
 @router.get("/patterns")
@@ -329,6 +403,39 @@ async def health_check():
         "active_cameras": camera_service.get_active_camera_count(),
         "version": "1.0.0"
     }
+
+
+@router.post("/system/command")
+async def process_command_endpoint(command: dict):
+    """
+    Process a natural language command
+    
+    Request body:
+    {
+        "command": "watch for people entering the building",
+        "params": {}
+    }
+    """
+    try:
+        command_text = command.get("command", "")
+        params = command.get("params", {})
+        
+        if not command_text:
+            raise HTTPException(status_code=400, detail="Command text is required")
+        
+        logger.info(f"[COMMAND API] Received command: {command_text}")
+        
+        # Process the command
+        await process_user_command(command_text, params)
+        
+        return {
+            "status": "processing",
+            "command": command_text,
+            "message": "Command received and being processed"
+        }
+    except Exception as e:
+        logger.error(f"[COMMAND API] Error processing command: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # Helper functions
@@ -415,6 +522,46 @@ async def start_monitoring_task(task_command: dict):
     task_id = task_command.get('task_id')
     camera_ids = task_command.get('parameters', {}).get('camera_ids', ['all'])
 
+    # Auto-start camera 0 (webcam) if no cameras are active
+    if camera_service.get_active_camera_count() == 0:
+        logger.info("[CAMERA] No cameras active, auto-starting camera 0 (webcam)")
+        try:
+            # Initialize camera 0 (default webcam) with lower resolution for speed
+            success = await camera_service.initialize_camera(
+                camera_id=0,
+                source=0,  # Default webcam
+                fps=1,  # Lower FPS for faster processing
+                resolution=(640, 480)  # Lower resolution for faster processing
+            )
+            if success:
+                logger.info("[CAMERA] ✓ Camera 0 started successfully")
+                await manager.send_system_message("camera_started", {
+                    "camera_id": 0,
+                    "status": "success",
+                    "message": "Camera 0 auto-started for monitoring"
+                })
+            else:
+                logger.error("[CAMERA] ✗ Failed to start camera 0 - Check permissions!")
+                await manager.send_system_message("camera_error", {
+                    "camera_id": 0,
+                    "status": "failed",
+                    "message": "⚠️ Failed to start camera. Please check:\n1. Camera permissions in System Settings\n2. No other app is using the camera\n3. Try using a video file instead: upload a video for testing",
+                    "permission_help": {
+                        "macos": "Go to System Settings → Privacy & Security → Camera → Enable for Terminal/Python",
+                        "alternative": "You can test with a video file: use /api/video/query-scene endpoint"
+                    }
+                })
+                # Don't return - continue with no active cameras for now
+        except Exception as e:
+            logger.error(f"[CAMERA] Exception starting camera 0: {e}")
+            await manager.send_system_message("camera_error", {
+                "camera_id": 0,
+                "status": "error",
+                "message": f"Camera error: {str(e)}. You can test with video files instead.",
+                "error_details": str(e)
+            })
+            # Don't return - continue with no active cameras
+
     # Determine which cameras to monitor
     if camera_ids == ['all'] or 'all' in camera_ids:
         target_cameras = list(camera_service.active_cameras.keys())
@@ -427,7 +574,7 @@ async def start_monitoring_task(task_command: dict):
         "task_type": task_command.get('task_type'),
         "target": task_command.get('target'),
         "cameras": target_cameras,
-        "message": f"Started monitoring on {len(target_cameras)} camera(s)"
+        "message": f"Started monitoring on {len(target_cameras)} camera(s) for: {task_command.get('target')}"
     })
 
 
@@ -506,3 +653,449 @@ async def test_camera_status():
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# Video Timestamp Analysis Endpoints
+from pydantic import BaseModel
+
+class VideoSceneQueryRequest(BaseModel):
+    """Request model for video scene query"""
+    video_file_path: str
+    scene_query: str
+    camera_id: Optional[int] = None
+    fps: Optional[int] = None
+
+
+class VideoTimelineRequest(BaseModel):
+    """Request model for video timeline analysis"""
+    video_file_path: str
+    camera_id: Optional[int] = None
+    fps: Optional[int] = 1
+
+
+@router.post("/video/query-scene")
+async def query_scene_in_video(request: VideoSceneQueryRequest):
+    """
+    Query for specific scenes in a video and get timestamps when they occur
+
+    This endpoint allows you to ask questions like:
+    - "when does a person wearing red appear?"
+    - "when does someone enter through the door?"
+    - "when is there a vehicle in the frame?"
+
+    The API will return timestamps (MM:SS format) for when the queried scene occurs.
+
+    Example request:
+    ```json
+    {
+        "video_file_path": "/path/to/video.mp4",
+        "scene_query": "when does a person wearing red clothing appear?",
+        "camera_id": 1,
+        "fps": 2
+    }
+    ```
+
+    Example response:
+    ```json
+    {
+        "found": true,
+        "timestamps": ["00:15", "01:23", "02:45"],
+        "descriptions": [
+            {
+                "timestamp": "00:15",
+                "description": "Person in red shirt enters from left",
+                "confidence": 0.95,
+                "key_details": ["red shirt", "entering", "carrying bag"]
+            }
+        ],
+        "summary": "Person in red clothing appears 3 times in the video"
+    }
+    ```
+    """
+    try:
+        result = await vision_agent.query_scene_in_video(
+            video_file_path=request.video_file_path,
+            scene_query=request.scene_query,
+            camera_id=request.camera_id,
+            fps=request.fps
+        )
+
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Video file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/video/timeline")
+async def analyze_video_timeline(request: VideoTimelineRequest):
+    """
+    Analyze a complete video file and get a timeline of events with timestamps
+
+    This endpoint provides a comprehensive timeline of all significant events
+    in a surveillance video, including timestamps for each event.
+
+    Example request:
+    ```json
+    {
+        "video_file_path": "/path/to/surveillance.mp4",
+        "camera_id": 1,
+        "fps": 2
+    }
+    ```
+
+    Example response:
+    ```json
+    {
+        "events": [
+            {
+                "timestamp": "00:00",
+                "event_type": "person_detected",
+                "description": "Person enters frame from left",
+                "significance": 60,
+                "detections": ["person"]
+            },
+            {
+                "timestamp": "00:45",
+                "event_type": "vehicle_detected",
+                "description": "Car parks in view",
+                "significance": 75,
+                "detections": ["vehicle", "person"]
+            }
+        ],
+        "summary": "Video shows normal activity with 3 people and 2 vehicles",
+        "total_duration": "05:30",
+        "key_moments": ["00:45", "02:15", "04:30"]
+    }
+    ```
+    """
+    try:
+        result = await vision_agent.analyze_video_with_timestamps(
+            video_file_path=request.video_file_path,
+            camera_id=request.camera_id,
+            fps=request.fps
+        )
+
+        if "error" in result:
+            raise HTTPException(status_code=500, detail=result["error"])
+
+        return result
+
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Video file not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/video/capabilities")
+async def video_analysis_capabilities():
+    """
+    Get information about video analysis capabilities
+
+    Returns documentation about how to use video timestamp features
+    """
+    return {
+        "video_timestamp_support": True,
+        "capabilities": {
+            "scene_query": {
+                "description": "Query for specific scenes and get timestamps",
+                "endpoint": "/api/video/query-scene",
+                "method": "POST",
+                "example_queries": [
+                    "when does a person wearing red appear?",
+                    "when does someone enter through the door?",
+                    "when is there a vehicle in the frame?",
+                    "when does suspicious activity occur?"
+                ]
+            },
+            "timeline_analysis": {
+                "description": "Get complete timeline of events with timestamps",
+                "endpoint": "/api/video/timeline",
+                "method": "POST",
+                "features": [
+                    "Event detection with timestamps",
+                    "Significance scoring",
+                    "Key moment identification",
+                    "Event categorization"
+                ]
+            }
+        },
+        "timestamp_format": "MM:SS",
+        "supported_fps": "1-30 FPS (default: 1 FPS for efficiency)",
+        "video_formats": ["mp4", "avi", "mov", "mkv"],
+        "notes": [
+            "Higher FPS provides more detail but costs more tokens",
+            "Default 1 FPS works well for static scenes",
+            "Use 2-5 FPS for dynamic scenes",
+            "Timestamps are only returned when specifically queried for scenes",
+            "File API automatically processes video at specified FPS"
+        ],
+        "usage_tips": [
+            "Be specific in scene queries for better accuracy",
+            "Use timeline analysis to get overview before specific queries",
+            "Adjust FPS based on scene dynamics",
+            "Consider token costs when using higher FPS"
+        ]
+    }
+
+
+# ============================================================================
+# Event Frames Endpoints
+# ============================================================================
+
+@router.get("/frames/list")
+async def list_event_frames(
+    camera_id: Optional[int] = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0)
+):
+    """
+    List saved event frames
+
+    Args:
+        camera_id: Filter by camera ID (optional)
+        limit: Maximum number of frames to return
+        offset: Offset for pagination
+
+    Returns:
+        List of frame metadata with URLs
+    """
+    from pathlib import Path
+    import re
+    from datetime import datetime as dt
+
+    event_frames_dir = Path(__file__).parent.parent / "event_frames"
+
+    if not event_frames_dir.exists():
+        return {
+            "frames": [],
+            "total": 0,
+            "camera_id": camera_id,
+            "limit": limit,
+            "offset": offset
+        }
+
+    # Get all frame files
+    all_frames = []
+    for frame_file in event_frames_dir.glob("*.jpg"):
+        # Parse filename: camera{id}_{timestamp}_sig{significance}.jpg or camera{id}_{timestamp}_task{id}.jpg
+        filename = frame_file.name
+
+        # Extract camera_id from filename
+        match = re.match(r'camera(\d+)_(\d{8}_\d{6}_\d+)_(sig(\d+)|task([\w]+))\.jpg', filename)
+        if match:
+            file_camera_id = int(match.group(1))
+            timestamp_str = match.group(2)
+
+            # Filter by camera_id if specified
+            if camera_id is not None and file_camera_id != camera_id:
+                continue
+
+            # Parse timestamp
+            try:
+                timestamp = dt.strptime(timestamp_str[:15], "%Y%m%d_%H%M%S")
+            except:
+                timestamp = dt.fromtimestamp(frame_file.stat().st_mtime)
+
+            # Get significance or task info
+            significance = None
+            task_id = None
+            if match.group(4):  # sig group
+                significance = int(match.group(4))
+            elif match.group(5):  # task group
+                task_id = match.group(5)
+
+            all_frames.append({
+                "filename": filename,
+                "camera_id": file_camera_id,
+                "timestamp": timestamp.isoformat(),
+                "significance": significance,
+                "task_id": task_id,
+                "url": f"/event_frames/{filename}",
+                "size": frame_file.stat().st_size
+            })
+
+    # Sort by timestamp (newest first)
+    all_frames.sort(key=lambda x: x['timestamp'], reverse=True)
+
+    # Apply pagination
+    paginated_frames = all_frames[offset:offset + limit]
+
+    return {
+        "frames": paginated_frames,
+        "total": len(all_frames),
+        "camera_id": camera_id,
+        "limit": limit,
+        "offset": offset
+    }
+
+
+@router.get("/frames/recent")
+async def get_recent_event_frames(
+    camera_id: Optional[int] = None,
+    hours: int = Query(1, ge=1, le=168)  # Max 1 week
+):
+    """
+    Get event frames from recent hours
+
+    Args:
+        camera_id: Filter by camera ID (optional)
+        hours: Number of hours to look back
+
+    Returns:
+        Recent frames with metadata
+    """
+    from pathlib import Path
+    from datetime import datetime as dt, timedelta
+    import re
+
+    event_frames_dir = Path(__file__).parent.parent / "event_frames"
+
+    if not event_frames_dir.exists():
+        return {
+            "frames": [],
+            "hours": hours,
+            "camera_id": camera_id
+        }
+
+    cutoff_time = dt.utcnow() - timedelta(hours=hours)
+    recent_frames = []
+
+    for frame_file in event_frames_dir.glob("*.jpg"):
+        # Check file modification time
+        file_mtime = dt.fromtimestamp(frame_file.stat().st_mtime)
+
+        if file_mtime < cutoff_time:
+            continue
+
+        # Parse filename
+        filename = frame_file.name
+        match = re.match(r'camera(\d+)_(\d{8}_\d{6}_\d+)_(sig(\d+)|task([\w]+))\.jpg', filename)
+
+        if match:
+            file_camera_id = int(match.group(1))
+
+            # Filter by camera_id if specified
+            if camera_id is not None and file_camera_id != camera_id:
+                continue
+
+            timestamp_str = match.group(2)
+            try:
+                timestamp = dt.strptime(timestamp_str[:15], "%Y%m%d_%H%M%S")
+            except:
+                timestamp = file_mtime
+
+            significance = None
+            task_id = None
+            if match.group(4):
+                significance = int(match.group(4))
+            elif match.group(5):
+                task_id = match.group(5)
+
+            recent_frames.append({
+                "filename": filename,
+                "camera_id": file_camera_id,
+                "timestamp": timestamp.isoformat(),
+                "significance": significance,
+                "task_id": task_id,
+                "url": f"/event_frames/{filename}",
+                "size": frame_file.stat().st_size
+            })
+
+    # Sort by timestamp (newest first)
+    recent_frames.sort(key=lambda x: x['timestamp'], reverse=True)
+
+    return {
+        "frames": recent_frames,
+        "total": len(recent_frames),
+        "hours": hours,
+        "camera_id": camera_id,
+        "cutoff_time": cutoff_time.isoformat()
+    }
+
+
+@router.delete("/frames/{filename}")
+async def delete_event_frame(filename: str):
+    """
+    Delete a specific event frame
+
+    Args:
+        filename: Frame filename to delete
+
+    Returns:
+        Success status
+    """
+    from pathlib import Path
+
+    event_frames_dir = Path(__file__).parent.parent / "event_frames"
+    frame_path = event_frames_dir / filename
+
+    if not frame_path.exists():
+        raise HTTPException(status_code=404, detail="Frame not found")
+
+    # Security check: ensure filename is just a filename, not a path
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+
+    try:
+        frame_path.unlink()
+        return {
+            "success": True,
+            "filename": filename,
+            "message": "Frame deleted successfully"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete frame: {str(e)}")
+
+
+@router.delete("/frames/cleanup")
+async def cleanup_old_frames(
+    days: int = Query(7, ge=1, le=365)
+):
+    """
+    Delete event frames older than specified days
+
+    Args:
+        days: Delete frames older than this many days
+
+    Returns:
+        Cleanup statistics
+    """
+    from pathlib import Path
+    from datetime import datetime as dt, timedelta
+
+    event_frames_dir = Path(__file__).parent.parent / "event_frames"
+
+    if not event_frames_dir.exists():
+        return {
+            "deleted": 0,
+            "days": days
+        }
+
+    cutoff_time = dt.utcnow() - timedelta(days=days)
+    deleted_count = 0
+    deleted_size = 0
+
+    for frame_file in event_frames_dir.glob("*.jpg"):
+        file_mtime = dt.fromtimestamp(frame_file.stat().st_mtime)
+
+        if file_mtime < cutoff_time:
+            try:
+                file_size = frame_file.stat().st_size
+                frame_file.unlink()
+                deleted_count += 1
+                deleted_size += file_size
+            except Exception as e:
+                logger.warning(f"Failed to delete {frame_file.name}: {e}")
+
+    return {
+        "deleted": deleted_count,
+        "deleted_size_bytes": deleted_size,
+        "deleted_size_mb": round(deleted_size / (1024 * 1024), 2),
+        "days": days,
+        "cutoff_time": cutoff_time.isoformat()
+    }

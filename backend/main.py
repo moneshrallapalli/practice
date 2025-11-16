@@ -65,6 +65,12 @@ app.add_middleware(
 app.include_router(router, prefix="/api", tags=["api"])
 app.include_router(ws_router, tags=["websocket"])
 
+# Mount event frames directory for static file access
+from pathlib import Path
+event_frames_path = Path(__file__).parent / "event_frames"
+event_frames_path.mkdir(exist_ok=True)
+app.mount("/event_frames", StaticFiles(directory=str(event_frames_path)), name="event_frames")
+
 
 # Root endpoint
 @app.get("/")
@@ -99,10 +105,16 @@ async def surveillance_worker():
     from datetime import datetime
     import base64
     import cv2
+    import os
+    from pathlib import Path
 
     vision_agent = VisionAgent()
     context_agent = ContextAgent()
     command_agent = CommandAgent()
+
+    # Create event frames directory
+    event_frames_dir = Path(__file__).parent / "event_frames"
+    event_frames_dir.mkdir(exist_ok=True)
 
     logger.info("Surveillance worker started")
 
@@ -151,15 +163,35 @@ async def surveillance_worker():
                                 analysis
                             )
 
-                            # Send analysis update (works without database)
+                            # Calculate significance
+                            significance = vision_agent.calculate_significance_score(analysis)
+
+                            # Save EVERY frame with timestamp for quick access
+                            timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+                            frame_filename = f"camera{camera_id}_{timestamp_str}.jpg"
+                            frame_path = event_frames_dir / frame_filename
+                            cv2.imwrite(str(frame_path), frame)
+                            frame_url = f"/event_frames/{frame_filename}"
+                            logger.info(f"[FRAME SAVED] Frame saved: {frame_filename}")
+
+                            # Extract detection list for easier access
+                            detections_list = analysis.get('detections', [])
+                            detected_objects = [d.get('label', '') for d in detections_list]
+
+                            # Send analysis update (works without database) with frame
                             analysis_update = {
                                 "camera_id": camera_id,
                                 "scene_description": analysis.get('scene_description', ''),
-                                "significance": vision_agent.calculate_significance_score(analysis),
-                                "detections": len(analysis.get('detections', [])),
-                                "context": context_summary
+                                "significance": significance,
+                                "detections": detections_list,  # Full detection list
+                                "detected_objects": detected_objects,  # List of object names
+                                "detection_count": len(detections_list),
+                                "context": context_summary,
+                                "frame_url": frame_url,  # Always include frame URL
+                                "frame_base64": frame_base64,  # Include base64 for direct display
+                                "timestamp": datetime.utcnow().isoformat()
                             }
-                            logger.info(f"[WEBSOCKET] Sending analysis update: significance={analysis_update['significance']}, detections={analysis_update['detections']}")
+                            logger.info(f"[WEBSOCKET] Analysis: significance={significance}, objects={detected_objects}, frame={frame_url}")
                             await manager.send_analysis_update(analysis_update)
 
                             # Try to store event in database (optional - continue if fails)
@@ -259,6 +291,13 @@ async def surveillance_worker():
 
                                         # Send task update if alert needed
                                         if task_result.get('alert_needed'):
+                                            # Save frame for task alert
+                                            timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
+                                            frame_filename = f"camera{camera_id}_{timestamp_str}_task{task_id[-8:]}.jpg"
+                                            frame_path = event_frames_dir / frame_filename
+                                            cv2.imwrite(str(frame_path), frame)
+                                            logger.info(f"[FRAME SAVED] Task alert triggered for task {task_id}, frame saved to: {frame_filename}")
+
                                             await manager.send_system_message("task_alert", {
                                                 "task_id": task_id,
                                                 "camera_id": camera_id,
@@ -266,7 +305,8 @@ async def surveillance_worker():
                                                 "target": task_command.get('target'),
                                                 "findings": task_result.get('findings'),
                                                 "alert_message": task_result.get('alert_message'),
-                                                "timestamp": datetime.utcnow().isoformat()
+                                                "timestamp": datetime.utcnow().isoformat(),
+                                                "frame_path": str(frame_path)  # Include frame path
                                             })
                                     except Exception as task_error:
                                         logger.debug(f"Task analysis error: {task_error}")

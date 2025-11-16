@@ -54,39 +54,36 @@ class VisionAgent:
         )
 
         # System prompt for surveillance analysis
-        self.system_prompt = """You are an intelligent surveillance analysis system. Analyze the video stream continuously and provide:
+        self.system_prompt = """You are an intelligent surveillance analysis system. Analyze frames and provide detailed object detection.
 
-1. OBJECT DETECTION: List all visible objects, people, vehicles with approximate locations
-2. SCENE UNDERSTANDING: Describe the current scene and activity
-3. CONTEXT AWARENESS: Note any changes from previous frames
-4. SIGNIFICANCE: Rate the importance of current events (0-100)
-5. NATURAL NARRATION: Provide a concise description of what's happening
+CRITICAL: Always respond with VALID JSON ONLY. No markdown, no code blocks, just pure JSON.
 
-Format your response as JSON with the following structure:
+Detect ALL objects including:
+- People (number of people, actions, clothing)
+- Objects (phones, laptops, bags, tools, scissors, nail cutters, keys, etc.)
+- Furniture and environment
+- Actions and activities
+
+Response format (PURE JSON):
 {
-  "timestamp": "ISO timestamp",
-  "scene_description": "Concise narrative description",
+  "timestamp": "2024-01-01T12:00:00",
+  "scene_description": "Brief description of the scene",
   "detections": [
     {
-      "object_type": "person|vehicle|object|animal|other",
-      "label": "specific description",
+      "object_type": "object",
+      "label": "nail cutter",
       "confidence": 0.95,
-      "location": "approximate location in frame",
-      "attributes": ["attribute1", "attribute2"]
+      "location": "center of frame, on desk",
+      "attributes": ["metal", "small"]
     }
   ],
   "activity": "what is happening",
-  "significance": 75,
-  "changes": "what changed from previous frame",
-  "alerts": [
-    {
-      "severity": "CRITICAL|WARNING|INFO",
-      "message": "alert description"
-    }
-  ]
+  "significance": 60,
+  "changes": "what changed",
+  "alerts": []
 }
 
-Focus on security-relevant events and anomalies. Be concise but thorough."""
+Be specific about objects. If you see a nail cutter, phone, or any tool - LIST IT in detections."""
 
     async def analyze_frame(
         self,
@@ -161,25 +158,35 @@ Focus on security-relevant events and anomalies. Be concise but thorough."""
             # Remove markdown code block if present
             if text.startswith('```json'):
                 text = text[7:]
-            if text.startswith('```'):
+            elif text.startswith('```'):
                 text = text[3:]
             if text.endswith('```'):
                 text = text[:-3]
 
             text = text.strip()
 
+            # Try to find JSON object if it's embedded in other text
+            if not text.startswith('{'):
+                # Find first { and last }
+                start = text.find('{')
+                end = text.rfind('}')
+                if start != -1 and end != -1:
+                    text = text[start:end+1]
+
             # Parse JSON
             analysis = json.loads(text)
 
-            # Ensure required fields
-            if 'scene_description' not in analysis:
-                analysis['scene_description'] = text[:200]
+            # Ensure required fields with defaults
+            if 'scene_description' not in analysis or not analysis['scene_description']:
+                analysis['scene_description'] = text[:200] if len(text) < 500 else "Scene analysis"
             if 'significance' not in analysis:
                 analysis['significance'] = 50
-            if 'detections' not in analysis:
+            if 'detections' not in analysis or not isinstance(analysis['detections'], list):
                 analysis['detections'] = []
-            if 'alerts' not in analysis:
+            if 'alerts' not in analysis or not isinstance(analysis['alerts'], list):
                 analysis['alerts'] = []
+            if 'activity' not in analysis:
+                analysis['activity'] = analysis.get('scene_description', '')[:100]
 
             return analysis
 
@@ -352,3 +359,256 @@ Focus on security-relevant events and anomalies. Be concise but thorough."""
             })
 
         return detections
+
+    async def query_scene_in_video(
+        self,
+        video_file_path: str,
+        scene_query: str,
+        camera_id: Optional[int] = None,
+        fps: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """
+        Query for specific scenes in a video and return timestamps when they occur
+
+        This method uploads a video file to Gemini API and asks about specific scenes,
+        getting timestamps for when those scenes occur.
+
+        Args:
+            video_file_path: Path to the video file
+            scene_query: Description of the scene to find (e.g., "when does a person enter the room?")
+            camera_id: Optional camera ID for tracking
+            fps: Optional frame rate for video processing (default: 1 FPS)
+
+        Returns:
+            Dictionary containing:
+            - scene_query: The original query
+            - found: Boolean indicating if scene was found
+            - timestamps: List of timestamps (MM:SS format) where scene occurs
+            - descriptions: Detailed descriptions for each timestamp
+            - full_response: Complete response from Gemini
+
+        Example:
+            >>> agent = VisionAgent()
+            >>> result = await agent.query_scene_in_video(
+            ...     "surveillance_footage.mp4",
+            ...     "when does a person wearing red clothing appear?"
+            ... )
+            >>> print(result['timestamps'])  # ['00:15', '01:23', '02:45']
+        """
+        try:
+            from loguru import logger
+            logger.info(f"Uploading video file: {video_file_path}")
+
+            # Upload video file to Gemini
+            video_file = genai.upload_file(path=video_file_path)
+
+            logger.info(f"Processing video file: {video_file.name}")
+
+            # Wait for video processing
+            while video_file.state.name == "PROCESSING":
+                await asyncio.sleep(2)
+                video_file = genai.get_file(video_file.name)
+
+            if video_file.state.name == "FAILED":
+                raise ValueError(f"Video processing failed: {video_file.state}")
+
+            logger.info("Video processed successfully")
+
+            # Build prompt specifically for timestamp queries
+            timestamp_prompt = f"""Analyze this surveillance video and identify when the following scene occurs:
+
+SCENE TO FIND: {scene_query}
+
+Provide your response in the following JSON format:
+{{
+  "found": true/false,
+  "timestamps": ["MM:SS", "MM:SS", ...],  // List of timestamps where the scene occurs
+  "descriptions": [
+    {{
+      "timestamp": "MM:SS",
+      "description": "Detailed description of what is happening at this moment",
+      "confidence": 0.95,  // Confidence that this matches the query (0-1)
+      "key_details": ["detail1", "detail2"]  // Key visual details
+    }}
+  ],
+  "summary": "Overall summary of findings"
+}}
+
+IMPORTANT:
+- Only include timestamps where the described scene ACTUALLY occurs
+- Use MM:SS format for all timestamps
+- Be precise with timing
+- Include confidence scores
+- If the scene never occurs, set "found" to false and return empty lists"""
+
+            # Create content parts with video metadata if FPS is specified
+            if fps:
+                from google.generativeai import types
+                content = [
+                    types.Part.from_dict({
+                        'file_data': {
+                            'file_uri': video_file.uri,
+                            'mime_type': video_file.mime_type
+                        },
+                        'video_metadata': types.VideoMetadata(fps=fps)
+                    }),
+                    timestamp_prompt
+                ]
+            else:
+                content = [video_file, timestamp_prompt]
+
+            logger.info("Generating timestamp analysis...")
+
+            # Generate analysis with timestamps
+            response = await asyncio.to_thread(
+                self.model.generate_content,
+                content
+            )
+
+            # Parse response
+            analysis = self._parse_gemini_response(response.text)
+
+            # Add metadata
+            result = {
+                "scene_query": scene_query,
+                "camera_id": camera_id,
+                "video_file": video_file_path,
+                "found": analysis.get('found', False),
+                "timestamps": analysis.get('timestamps', []),
+                "descriptions": analysis.get('descriptions', []),
+                "summary": analysis.get('summary', ''),
+                "full_response": response.text,
+                "processed_at": datetime.utcnow().isoformat()
+            }
+
+            logger.info(f"Scene query complete. Found: {result['found']}, Timestamps: {result['timestamps']}")
+
+            # Cleanup: delete uploaded file
+            genai.delete_file(video_file.name)
+            logger.info("Cleaned up uploaded video file")
+
+            return result
+
+        except Exception as e:
+            import traceback
+            from loguru import logger
+            logger.error(f"Video scene query error: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "error": str(e),
+                "scene_query": scene_query,
+                "camera_id": camera_id,
+                "found": False,
+                "timestamps": [],
+                "descriptions": [],
+                "summary": "Analysis failed"
+            }
+
+    async def analyze_video_with_timestamps(
+        self,
+        video_file_path: str,
+        camera_id: Optional[int] = None,
+        fps: Optional[int] = 1,
+        include_timestamps: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Analyze a complete video file and get timestamped events
+
+        This provides a timeline of significant events in the video with timestamps.
+
+        Args:
+            video_file_path: Path to the video file
+            camera_id: Optional camera ID for tracking
+            fps: Frame rate for processing (default: 1 FPS)
+            include_timestamps: Whether to include timestamps in analysis
+
+        Returns:
+            Dictionary containing timeline of events with timestamps
+        """
+        try:
+            from loguru import logger
+            logger.info(f"Uploading video for timeline analysis: {video_file_path}")
+
+            # Upload video file
+            video_file = genai.upload_file(path=video_file_path)
+
+            # Wait for processing
+            while video_file.state.name == "PROCESSING":
+                await asyncio.sleep(2)
+                video_file = genai.get_file(video_file.name)
+
+            if video_file.state.name == "FAILED":
+                raise ValueError(f"Video processing failed")
+
+            # Build prompt for timeline analysis
+            timeline_prompt = """Analyze this surveillance video and create a timeline of significant events.
+
+Provide your response in JSON format:
+{
+  "events": [
+    {
+      "timestamp": "MM:SS",
+      "event_type": "person_detected|vehicle_detected|object_moved|suspicious_activity|other",
+      "description": "What happened",
+      "significance": 75,
+      "detections": ["person", "vehicle", etc.]
+    }
+  ],
+  "summary": "Overall summary of the video",
+  "total_duration": "MM:SS",
+  "key_moments": ["MM:SS", "MM:SS"]  // Most important timestamps
+}
+
+Include timestamps for all significant events. Focus on security-relevant activities."""
+
+            # Generate analysis
+            if fps and fps != 1:
+                from google.generativeai import types
+                content = [
+                    types.Part.from_dict({
+                        'file_data': {
+                            'file_uri': video_file.uri,
+                            'mime_type': video_file.mime_type
+                        },
+                        'video_metadata': types.VideoMetadata(fps=fps)
+                    }),
+                    timeline_prompt
+                ]
+            else:
+                content = [video_file, timeline_prompt]
+
+            response = await asyncio.to_thread(
+                self.model.generate_content,
+                content
+            )
+
+            # Parse response
+            analysis = self._parse_gemini_response(response.text)
+
+            result = {
+                "camera_id": camera_id,
+                "video_file": video_file_path,
+                "events": analysis.get('events', []),
+                "summary": analysis.get('summary', ''),
+                "total_duration": analysis.get('total_duration', ''),
+                "key_moments": analysis.get('key_moments', []),
+                "full_response": response.text,
+                "processed_at": datetime.utcnow().isoformat()
+            }
+
+            # Cleanup
+            genai.delete_file(video_file.name)
+
+            return result
+
+        except Exception as e:
+            import traceback
+            from loguru import logger
+            logger.error(f"Video timeline analysis error: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {
+                "error": str(e),
+                "camera_id": camera_id,
+                "events": [],
+                "summary": "Analysis failed"
+            }

@@ -41,10 +41,10 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
     # Camera Configuration
-    CAMERA_FPS: int = 2
+    CAMERA_FPS: int = 1  # Reduced for faster processing
     MAX_CAMERAS: int = 4
-    VIDEO_RESOLUTION_WIDTH: int = 1280
-    VIDEO_RESOLUTION_HEIGHT: int = 720
+    VIDEO_RESOLUTION_WIDTH: int = 640  # Reduced for faster processing
+    VIDEO_RESOLUTION_HEIGHT: int = 480  # Reduced for faster processing
 
     # Alert Thresholds
     CRITICAL_THRESHOLD: int = 80

@@ -31,6 +31,7 @@ class CommandAgent:
         genai.configure(api_key=self.api_key)
 
         # Initialize Gemini model for command processing
+        from google.generativeai.types import HarmCategory, HarmBlockThreshold
         self.model = genai.GenerativeModel(
             model_name='gemini-2.5-flash',
             generation_config=GenerationConfig(
@@ -39,6 +40,12 @@ class CommandAgent:
                 top_k=40,
                 max_output_tokens=1024,
             ),
+            safety_settings={
+                HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE,
+                HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE,
+            }
         )
 
         # System prompt for command understanding
@@ -135,8 +142,29 @@ Always be clear, concise, and security-focused. Respond only with valid JSON."""
                 prompt
             )
 
-            # Parse response
-            parsed_command = self._parse_command_response(response.text)
+            # Check if response was blocked by safety filters
+            if not response.parts or not response.text:
+                # Handle safety block or empty response
+                from loguru import logger
+                logger.warning(f"Command response blocked or empty. Finish reason: {response.candidates[0].finish_reason if response.candidates else 'unknown'}")
+
+                # Create a default surveillance task for the command
+                parsed_command = {
+                    "task_type": "surveillance",
+                    "target": user_command,
+                    "parameters": {
+                        "camera_ids": ["all"],
+                        "duration": "continuous",
+                        "alert_threshold": "medium",
+                        "specific_conditions": [user_command]
+                    },
+                    "confirmation": f"I will monitor for: {user_command}",
+                    "understood_intent": user_command
+                }
+            else:
+                # Parse response
+                parsed_command = self._parse_command_response(response.text)
+
             parsed_command['original_command'] = user_command
             parsed_command['timestamp'] = datetime.utcnow().isoformat()
 
