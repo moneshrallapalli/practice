@@ -103,23 +103,39 @@ The stop scripts will:
 
 ### 1. Get Gemini API Key
 
-1. Visit https://ai.google.dev/
-2. Click "Get API Key"
-3. Create or select a project
-4. Copy your API key
+**Detailed instructions: See [API_KEY_SETUP.md](API_KEY_SETUP.md)**
+
+Quick steps:
+1. Visit https://aistudio.google.com/app/apikey
+2. Sign in with your Google account
+3. Click "Get API key" → "Create API key in new project"
+4. Copy your API key (starts with `AIzaSy...`)
+
+**Need help?** Check the [detailed API key guide](API_KEY_SETUP.md)
 
 ### 2. Configure Environment
 
 ```bash
+# Copy the example file
+cp backend/.env.example backend/.env
+
 # Edit backend/.env
 nano backend/.env  # or use any text editor
 
 # Replace this line:
 GEMINI_API_KEY=your_api_key_here
 
-# With your actual key:
+# With your actual key (no quotes, no spaces):
 GEMINI_API_KEY=AIzaSyD...your-actual-key
 ```
+
+**Test your API key:**
+```bash
+cd backend
+python test_api_key.py
+```
+
+This will verify your API key is configured correctly before starting the app.
 
 ### 3. Start the System
 
