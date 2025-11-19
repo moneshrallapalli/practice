@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     CLAUDE_API_KEY: str  # Anthropic Claude API key for reasoning agent
     GOOGLE_PROJECT_ID: Optional[str] = None
 
+    # Email Configuration (Brevo - Most Reliable)
+    BREVO_API_KEY: Optional[str] = None
+    EMAIL_RECIPIENT: str = "moneshralapalli@gmail.com"
+
     # Database Configuration
     POSTGRES_HOST: str = "localhost"
     POSTGRES_PORT: int = 5432

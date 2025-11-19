@@ -23,6 +23,7 @@ google-cloud-aiplatform==1.38.1
 
 # Anthropic Claude for reasoning
 anthropic>=0.40.0
+resend>=0.8.0
 
 # Computer Vision
 opencv-python==4.8.1.78

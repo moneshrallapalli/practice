@@ -18,6 +18,9 @@ from services import camera_service
 from agents import CommandAgent
 command_agent = CommandAgent()  # Shared global instance
 
+# Initialize email service
+from services.email_service import email_service
+
 # Startup and shutdown events
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -521,6 +524,12 @@ What I'm seeing: {analysis.get('scene_description', 'A potentially hazardous sit
 
                                 await manager.send_alert(immediate_alert_data)
                                 logger.info(f"🚨 IMMEDIATE ALERT SENT: {title} - Confidence: {query_confidence if user_query else significance}%")
+                                
+                                # Send email notification for critical alerts (using same data as frontend)
+                                try:
+                                    await email_service.send_critical_alert(alert_data=immediate_alert_data)
+                                except Exception as email_error:
+                                    logger.error(f"Failed to send alert email: {email_error}")
 
                             # Don't collect for 2-minute summary if already sent immediate alert
                             # This prevents duplicate notifications
@@ -711,6 +720,12 @@ What I'm seeing: {analysis.get('scene_description', 'A potentially hazardous sit
                     # Send single alert for entire 2-minute period
                     await manager.send_alert(alert_data)
                     logger.info(f"📩 2-MINUTE SUMMARY SENT: {severity} - {len(critical_events)} events, max={most_significant['significance']}%")
+                    
+                    # Send email notification for 2-minute summary (using same data as frontend)
+                    try:
+                        await email_service.send_summary_email(alert_data=alert_data)
+                    except Exception as email_error:
+                        logger.error(f"Failed to send summary email: {email_error}")
                 else:
                     logger.info(f"✓ 2-minute period complete - No events to summarize")
                 
