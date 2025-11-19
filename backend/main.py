@@ -219,23 +219,24 @@ async def surveillance_worker():
                             active_tasks = command_agent.get_active_tasks()
                             user_task_active = len(active_tasks) > 0 if active_tasks else False
                             
-                            # IMMEDIATE ALERT TRIGGERS (User requirement: >=60% for critical events):
+                            # IMMEDIATE ALERT TRIGGERS (User configurable threshold):
                             # 1. Dangerous keywords (always, any confidence)
-                            # 2. User task match with >=60% accuracy
-                            # 3. Critical events with >=60% significance
+                            # 2. User task match with >= threshold accuracy
+                            # 3. Critical events with >= threshold significance
+                            immediate_threshold = settings.IMMEDIATE_ALERT_THRESHOLD
                             should_send_immediate = (
                                 has_dangerous_keyword or  # Dangerous keywords (always)
-                                (user_task_active and significance >= 60) or  # User task >=60%
-                                (not user_task_active and significance >= 60)  # Critical event >=60%
+                                (user_task_active and significance >= immediate_threshold) or  # User task
+                                (not user_task_active and significance >= immediate_threshold)  # Critical event
                             )
                             
                             if should_send_immediate:
                                 reason = []
                                 if has_dangerous_keyword:
                                     reason.append("dangerous_keyword")
-                                if user_task_active and significance >= 60:
+                                if user_task_active and significance >= immediate_threshold:
                                     reason.append("user_task_match")
-                                if significance >= 60:
+                                if significance >= immediate_threshold:
                                     reason.append("critical_event")
                                 
                                 logger.info(f"🚨 IMMEDIATE CRITICAL ALERT: significance={significance}%, reasons={reason}")

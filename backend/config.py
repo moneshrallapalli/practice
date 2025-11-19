@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     # Alert Thresholds
     CRITICAL_THRESHOLD: int = 80
     WARNING_THRESHOLD: int = 50
+    IMMEDIATE_ALERT_THRESHOLD: int = 60  # Threshold for immediate action required alerts
 
     @property
     def database_url(self) -> str:

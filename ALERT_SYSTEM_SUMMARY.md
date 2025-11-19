@@ -327,3 +327,5 @@ Your surveillance system now:
 **Frame Storage:** ✅ Saving to event_frames/  
 **WebSocket:** ✅ Broadcasting alerts in real-time
 
+
+
