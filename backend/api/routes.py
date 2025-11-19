@@ -16,7 +16,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from database import get_db, Camera, Event, Detection, Alert, ContextPattern, AlertSeverity
 from api.websocket import manager
-from agents import VisionAgent, ContextAgent, CommandAgent
+from agents import VisionAgent, ContextAgent
 from services import camera_service
 from config import settings
 
@@ -24,10 +24,17 @@ from config import settings
 router = APIRouter()
 ws_router = APIRouter()
 
-# Initialize agents
+# Initialize local agents
 vision_agent = VisionAgent()
 context_agent = ContextAgent()
-command_agent = CommandAgent()
+
+# Get shared command_agent from main (will be set after main.py initializes it)
+def get_command_agent():
+    """Get the shared command_agent instance"""
+    import main
+    return main.command_agent
+
+command_agent = None  # Will be lazy-loaded when needed
 
 
 # WebSocket endpoints
@@ -647,8 +654,9 @@ async def process_user_command(command: str, params: dict):
             "timestamp": datetime.utcnow().isoformat()
         }
 
-        # Process command with CommandAgent
-        result = await command_agent.process_command(command, context)
+        # Process command with CommandAgent (use shared instance from main)
+        import main
+        result = await main.command_agent.process_command(command, context)
 
         # Send confirmation to user
         await manager.send_system_message("command_processed", {
@@ -663,7 +671,7 @@ async def process_user_command(command: str, params: dict):
         # Execute task based on type
         task_type = result.get('task_type')
 
-        if task_type in ['object_detection', 'surveillance', 'scene_analysis', 'anomaly_detection', 'tracking']:
+        if task_type in ['object_detection', 'activity_detection', 'state_change_detection', 'surveillance', 'scene_analysis', 'anomaly_detection', 'tracking']:
             # Start monitoring task
             await start_monitoring_task(result)
 

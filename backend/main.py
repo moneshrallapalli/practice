@@ -14,6 +14,9 @@ from database import init_db
 from api import router, ws_router
 from services import camera_service
 
+# Initialize shared agents (must be before importing routes that use them)
+from agents import CommandAgent
+command_agent = CommandAgent()  # Shared global instance
 
 # Startup and shutdown events
 @asynccontextmanager
@@ -110,7 +113,17 @@ async def surveillance_worker():
 
     vision_agent = VisionAgent()
     context_agent = ContextAgent()
-    command_agent = CommandAgent()
+    # Use the global command_agent instance (defined at module level)
+    global command_agent
+    
+    # Initialize Claude-based reasoning agent
+    try:
+        from agents.reasoning_agent import ReasoningAgent
+        reasoning_agent = ReasoningAgent()
+        logger.info("✅ Reasoning Agent (Claude) initialized")
+    except Exception as e:
+        logger.warning(f"⚠️ Reasoning Agent not available: {e}")
+        reasoning_agent = None
 
     # Create event frames directory
     event_frames_dir = Path(__file__).parent / "event_frames"
@@ -122,6 +135,9 @@ async def surveillance_worker():
     ANALYSIS_INTERVAL_SECONDS = 120  # 2 minutes for summary
     minute_start_time = datetime.utcnow()
     critical_events = []  # Store events for 2-min summary (non-immediate alerts)
+    
+    # Baseline state tracking for activity detection
+    baseline_states = {}  # {task_id: {"state": "...", "established_at": timestamp}}
 
     iteration = 0
     while True:
@@ -138,6 +154,45 @@ async def surveillance_worker():
 
             if active_camera_count > 0:
                 logger.info(f"Processing {active_camera_count} active camera(s)")
+                
+                # Check for active user tasks
+                active_tasks = command_agent.get_active_tasks()
+                user_query = None
+                target_object = None
+                requires_baseline = False
+                task_id = None
+                expected_change = None
+                query_type = None
+                
+                # Extract user query from active tasks
+                if active_tasks:
+                    # Get the most recent active task
+                    task_id = list(active_tasks.keys())[0]
+                    latest_task = active_tasks[task_id]
+                    task_command = latest_task.get('command', {})
+                    target_object = task_command.get('target', '')
+                    understood_intent = task_command.get('understood_intent', '')
+                    expected_change = task_command.get('expected_change', '')
+                    requires_baseline = task_command.get('requires_baseline', False)
+                    query_type = task_command.get('query_type', 'object')
+                    
+                    objects_to_detect = task_command.get('parameters', {}).get('objects_to_detect', [])
+                    activities_to_detect = task_command.get('parameters', {}).get('activities_to_detect', [])
+                    
+                    # Build focused query for vision agent
+                    if expected_change:
+                        user_query = expected_change
+                    elif target_object:
+                        user_query = target_object
+                    elif objects_to_detect:
+                        user_query = ', '.join(objects_to_detect)
+                    elif activities_to_detect:
+                        user_query = ', '.join(activities_to_detect)
+                    elif understood_intent:
+                        user_query = understood_intent
+                    
+                    logger.info(f"[USER QUERY ACTIVE] Type: {query_type} | Looking for: {user_query} | Requires baseline: {requires_baseline}")
+                
                 # Process each active camera
                 for camera_id in list(camera_service.active_cameras.keys()):
                     # Capture frame
@@ -150,9 +205,125 @@ async def surveillance_worker():
                     if frame is not None:
                         logger.info(f"Processing frame from camera {camera_id}, shape: {frame.shape}")
                         try:
-                            # Analyze frame with Vision Agent
-                            analysis = await vision_agent.analyze_frame(frame, camera_id)
-                            logger.info(f"[ANALYSIS] Camera {camera_id} - Scene: {analysis.get('scene_description', 'N/A')[:100]}, Error: {analysis.get('error', 'None')}")
+                            # Build context for vision agent (includes baseline for activity detection)
+                            vision_context = None
+                            if user_query and requires_baseline and task_id:
+                                # Check if we have a baseline established
+                                if task_id in baseline_states:
+                                    baseline_info = baseline_states[task_id]
+                                    vision_context = f"""BASELINE: {baseline_info['state']}
+EXPECTED CHANGE: {expected_change}
+TIME TRACKING: {(datetime.utcnow() - baseline_info['established_at']).seconds}s elapsed"""
+                                    logger.info(f"[BASELINE TRACKING] Comparing to baseline established {(datetime.utcnow() - baseline_info['established_at']).seconds}s ago")
+                            
+                            # Analyze frame with Vision Agent - pass user query and context
+                            analysis = await vision_agent.analyze_frame(
+                                frame, 
+                                camera_id, 
+                                previous_context=vision_context,
+                                user_query=user_query
+                            )
+                            
+                            # Handle baseline establishment for activity detection
+                            if user_query and requires_baseline and task_id and task_id not in baseline_states:
+                                # Check if this frame establishes the baseline
+                                if analysis.get('baseline_established', False):
+                                    current_state = analysis.get('current_state', analysis.get('scene_description', ''))
+                                    baseline_states[task_id] = {
+                                        'state': current_state,
+                                        'established_at': datetime.utcnow(),
+                                        'frame_saved': frame_path if 'frame_path' in locals() else None
+                                    }
+                                    logger.info(f"[BASELINE ESTABLISHED] State: {current_state[:100]}")
+                                    
+                                    # Notify user that baseline is set
+                                    await manager.send_system_message("baseline_established", {
+                                        "task_id": task_id,
+                                        "message": f"✓ Baseline established: {current_state[:150]}. Now monitoring for changes...",
+                                        "baseline_state": current_state
+                                    })
+                            
+                            # Log analysis with query match info
+                            query_match = analysis.get('query_match', False)
+                            query_confidence = analysis.get('query_confidence', 0)
+                            baseline_match = analysis.get('baseline_match', None)
+                            changes_detected = analysis.get('changes_detected', [])
+                            person_present = analysis.get('person_present', None)
+                            person_was_in_baseline = analysis.get('person_was_present_in_baseline', None)
+                            
+                            # GENERIC EMERGENCY DETECTION: Detect ANY significant change based on user query
+                            if requires_baseline and task_id in baseline_states:
+                                baseline_state_text = baseline_states[task_id]['state'].lower()
+                                current_scene_text = analysis.get('scene_description', '').lower()
+                                
+                                logger.info(f"[STATE COMPARISON] Baseline match from vision: {baseline_match}")
+                                logger.info(f"[STATE COMPARISON] Query confidence from vision: {query_confidence}%")
+                                
+                                # Check if vision agent detected a significant change (baseline_match = False)
+                                # This works for ANY query, not just person leaving
+                                if baseline_match == False:
+                                    logger.info(f"[STATE CHANGE DETECTED] Vision agent detected baseline mismatch!")
+                                    logger.info(f"[BASELINE] {baseline_state_text[:100]}")
+                                    logger.info(f"[CURRENT] {current_scene_text[:100]}")
+                                    
+                                    # If confidence is reasonable (>= 40%), this is likely the event the user wants
+                                    if query_confidence >= 40:
+                                        # Boost confidence for baseline changes that match the query
+                                        if query_confidence < 75:
+                                            logger.warning(f"[CONFIDENCE BOOST] Baseline changed and query matched - boosting from {query_confidence}% to 85%")
+                                            query_confidence = 85
+                                            query_match = True
+                                            analysis['query_confidence'] = 85
+                                            analysis['query_match'] = True
+                                            analysis['query_details'] = analysis.get('query_details', '') + f" [Baseline change detected with {query_confidence}% initial confidence]"
+                                    
+                                    # Even if confidence is low, if baseline doesn't match, something changed
+                                    elif query_confidence >= 20:
+                                        logger.warning(f"[STATE CHANGE] Baseline mismatch with low confidence ({query_confidence}%) - boosting to 60%")
+                                        query_confidence = 60
+                                        query_match = True
+                                        analysis['query_confidence'] = 60
+                                        analysis['query_match'] = True
+                            
+                            logger.info(f"[ANALYSIS] Camera {camera_id} - Scene: {analysis.get('scene_description', 'N/A')[:100]}")
+                            if user_query:
+                                if requires_baseline:
+                                    logger.info(f"[ACTIVITY TRACKING] Baseline match: {baseline_match} | Person in baseline: {person_was_in_baseline} | Person now: {person_present} | Changes: {changes_detected} | Query match: {query_match} ({query_confidence}%)")
+                                else:
+                                    logger.info(f"[QUERY MATCH] Query: '{user_query}' | Match: {query_match} | Confidence: {query_confidence}%")
+                            
+                            # 🧠 CLAUDE REASONING AGENT - Analyze with AI reasoning
+                            if reasoning_agent and user_query:
+                                try:
+                                    # Add current observation to history
+                                    reasoning_agent.add_observation(analysis)
+                                    
+                                    # Get Claude's reasoning about whether query is satisfied
+                                    baseline_for_claude = baseline_states[task_id]['state'] if (task_id and task_id in baseline_states) else None
+                                    
+                                    claude_decision = await reasoning_agent.analyze_scene_progression(
+                                        user_query=user_query,
+                                        baseline_state=baseline_for_claude,
+                                        current_observation=analysis,
+                                        previous_observations=reasoning_agent.get_observation_history()
+                                    )
+                                    
+                                    logger.info(f"[CLAUDE REASONING] Event occurred: {claude_decision.get('event_occurred')} | Confidence: {claude_decision.get('confidence_percentage')}% | Should alert: {claude_decision.get('should_alert')}")
+                                    logger.info(f"[CLAUDE REASONING] Reasoning: {claude_decision.get('reasoning', 'N/A')[:150]}")
+                                    
+                                    # Override with Claude's decision if it's more confident
+                                    if claude_decision.get('should_alert') and claude_decision.get('confidence_percentage', 0) > query_confidence:
+                                        logger.critical(f"🧠 CLAUDE OVERRIDE: Claude detected event with {claude_decision.get('confidence_percentage')}% confidence (higher than vision agent's {query_confidence}%)")
+                                        query_confidence = claude_decision.get('confidence_percentage', query_confidence)
+                                        query_match = True
+                                        analysis['query_confidence'] = query_confidence
+                                        analysis['query_match'] = True
+                                        analysis['query_details'] = claude_decision.get('alert_message', analysis.get('query_details', ''))
+                                        analysis['claude_reasoning'] = claude_decision.get('reasoning', '')
+                                        analysis['claude_decision'] = True
+                                        
+                                except Exception as claude_error:
+                                    logger.warning(f"[CLAUDE REASONING] Error: {claude_error}")
 
                             # Get context from Context Agent
                             context_summary = await context_agent.get_context_for_event(
@@ -171,8 +342,13 @@ async def surveillance_worker():
                                 analysis
                             )
 
-                            # Calculate significance
+                            # Calculate significance (boost for activity detection matches)
                             significance = vision_agent.calculate_significance_score(analysis)
+                            
+                            # Boost significance for activity matches
+                            if user_query and requires_baseline and query_match:
+                                significance = max(significance, query_confidence)
+                                logger.info(f"[SIGNIFICANCE BOOST] Activity match detected, significance: {significance}%")
 
                             # Save EVERY frame with timestamp for quick access
                             timestamp_str = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
@@ -202,75 +378,125 @@ async def surveillance_worker():
                             await manager.send_analysis_update(analysis_update)
                             logger.debug(f"[LIVE FEED] Updated (significance={significance}%)")
 
-                            # Check for IMMEDIATE CRITICAL ALERTS - ANY EVENT CHANGE OR USER TASK >50%
+                            # Check for IMMEDIATE CRITICAL ALERTS - FOCUSED ON USER QUERY
                             scene_text = analysis.get('scene_description', '').lower()
                             activity_text = analysis.get('activity', '').lower()
                             combined_text = scene_text + ' ' + activity_text
                             
-                            # Critical keywords for immediate alert (always trigger)
+                            # Critical keywords for immediate alert (always trigger for safety)
                             critical_keywords = ['weapon', 'gun', 'knife', 'violence', 'fight', 'attack', 
                                                 'threat', 'dangerous', 'hazard', 'fire', 'smoke', 'blood',
-                                                'injury', 'fall', 'accident', 'emergency', 'suspicious',
-                                                'intruder', 'break', 'damage', 'vandal', 'unusual', 'anomaly']
+                                                'injury', 'fall', 'accident', 'emergency']
                             
                             has_dangerous_keyword = any(keyword in combined_text for keyword in critical_keywords)
                             
-                            # Check if user has active tasks
-                            active_tasks = command_agent.get_active_tasks()
-                            user_task_active = len(active_tasks) > 0 if active_tasks else False
-                            
-                            # IMMEDIATE ALERT TRIGGERS (User configurable threshold):
-                            # 1. Dangerous keywords (always, any confidence)
-                            # 2. User task match with >= threshold accuracy
-                            # 3. Critical events with >= threshold significance
+                            # Get query match information from analysis
+                            query_match = analysis.get('query_match', False)
+                            query_confidence = analysis.get('query_confidence', 0)
                             immediate_threshold = settings.IMMEDIATE_ALERT_THRESHOLD
-                            should_send_immediate = (
-                                has_dangerous_keyword or  # Dangerous keywords (always)
-                                (user_task_active and significance >= immediate_threshold) or  # User task
-                                (not user_task_active and significance >= immediate_threshold)  # Critical event
-                            )
+                            
+                            # IMMEDIATE ALERT TRIGGERS (FOCUSED DETECTION):
+                            # 1. Dangerous keywords detected (safety - always trigger)
+                            # 2. User query SPECIFICALLY MATCHED with >= threshold confidence
+                            # NOTE: General activity without query match does NOT trigger immediate alerts
+                            should_send_immediate = False
+                            alert_reason = []
+                            
+                            if has_dangerous_keyword:
+                                should_send_immediate = True
+                                alert_reason.append("dangerous_keyword_detected")
+                            
+                            # Check for activity/state change match (EMERGENCY MODE - lower threshold)
+                            activity_threshold = settings.ACTIVITY_DETECTION_THRESHOLD if requires_baseline else immediate_threshold
+                            
+                            if user_query and query_match and query_confidence >= activity_threshold:
+                                should_send_immediate = True
+                                if requires_baseline:
+                                    alert_reason.append(f"🚨EMERGENCY_activity_detected_{query_confidence}%")
+                                    logger.critical(f"🚨 EMERGENCY ALERT TRIGGERED: Activity detected with {query_confidence}% confidence (threshold: {activity_threshold}%)")
+                                else:
+                                    alert_reason.append(f"user_query_matched_{query_confidence}%")
                             
                             if should_send_immediate:
-                                reason = []
-                                if has_dangerous_keyword:
-                                    reason.append("dangerous_keyword")
-                                if user_task_active and significance >= immediate_threshold:
-                                    reason.append("user_task_match")
-                                if significance >= immediate_threshold:
-                                    reason.append("critical_event")
                                 
-                                logger.info(f"🚨 IMMEDIATE CRITICAL ALERT: significance={significance}%, reasons={reason}")
+                                logger.info(f"🚨 IMMEDIATE ALERT: Reasons={alert_reason}, Query='{user_query}', Confidence={query_confidence}%")
+                                
                                 # Determine alert type based on what triggered it
                                 if has_dangerous_keyword:
                                     alert_type_text = "⚠️ HAZARDOUS/DANGEROUS EVENT"
                                     severity = "CRITICAL"
-                                elif user_task_active:
-                                    alert_type_text = "🎯 USER TASK DETECTED"
-                                    severity = "CRITICAL"
+                                    title = f"🚨 CRITICAL DANGER ALERT - Camera {camera_id}"
                                 else:
-                                    alert_type_text = "🔔 EVENT CHANGE DETECTED"
-                                    severity = "WARNING" if significance < 70 else "CRITICAL"
+                                    # For activity detection, always use CRITICAL severity
+                                    if requires_baseline:
+                                        alert_type_text = f"🚨 EMERGENCY: {user_query.upper()}"
+                                        severity = "CRITICAL"
+                                        title = f"🚨 CRITICAL EVENT: {user_query.title()} - Camera {camera_id}"
+                                    else:
+                                        alert_type_text = f"🎯 FOUND: {user_query.upper()}"
+                                        severity = "CRITICAL" if query_confidence >= 80 else "WARNING"
+                                        title = f"✓ {user_query.title()} Detected - Camera {camera_id}"
                                 
-                                alert_summary = f"""**🚨 IMMEDIATE ACTION REQUIRED** (Confidence: {significance}%)
+                                # Build alert message
+                                if user_query and query_match:
+                                    if requires_baseline and task_id in baseline_states:
+                                        # Activity/State change detected - EMERGENCY FORMAT
+                                        baseline_info = baseline_states[task_id]
+                                        time_elapsed = (datetime.utcnow() - baseline_info['established_at']).seconds
+                                        
+                                        is_emergency = analysis.get('emergency_detection', False)
+                                        is_claude_decision = analysis.get('claude_decision', False)
+                                        claude_reasoning = analysis.get('claude_reasoning', '')
+                                        
+                                        # Professional voice assistant style notification
+                                        time_str = f"{time_elapsed} seconds" if time_elapsed < 60 else f"{time_elapsed // 60} minute{'s' if time_elapsed // 60 > 1 else ''}"
+                                        confidence_desc = 'very confident' if query_confidence >= 90 else 'confident' if query_confidence >= 70 else 'reasonably certain'
+                                        
+                                        alert_summary = f"""Hey, I need to notify you about something important.
 
-**{alert_type_text}** - Requires immediate review!
+I've detected {analysis.get('query_details', 'the activity you asked me to watch for').lower()}.
 
-**Scene:** {analysis.get('scene_description', 'No description')}
+Here's what happened: Initially, I observed {baseline_info['state'][:120].lower()}. Now, {analysis.get('state_analysis', analysis.get('scene_description', 'the situation has changed')).lower()}.
+
+{f"After analyzing the scene progression, I'm {confidence_desc} ({query_confidence}% match) that {user_query.lower()}." if query_confidence >= 60 else f"I noticed some changes that seem to match what you asked me to look for ({query_confidence}% match)."}
+
+{'This was verified through advanced AI reasoning to ensure accuracy.' if is_claude_decision and claude_reasoning else ''}
+
+This alert was triggered {time_str} after I started monitoring. I've attached visual evidence for you to review – you can see the before and after states clearly.
+
+Would you like me to continue monitoring, or should I take any other action?"""
+                                    else:
+                                        # Object detection - Professional voice assistant style
+                                        time_now = datetime.utcnow().strftime('%I:%M %p')
+                                        confidence_level = 'quite sure' if query_confidence >= 80 else 'fairly confident' if query_confidence >= 60 else 'reasonably certain'
+                                        
+                                        alert_summary = f"""Good news – I found what you were looking for!
+
+You asked me to watch for {user_query.lower()}, and I've just spotted it on Camera {camera_id} at {time_now}.
+
+Here's what I see: {analysis.get('query_details', analysis.get('scene_description', 'Your requested item is in view')).lower().capitalize()}.
+
+I'm {confidence_level} this is a match ({query_confidence}% confidence). {f"I also noticed {', '.join(detected_objects[:3])} in the frame." if detected_objects and len(detected_objects) > 0 else ""}
+
+I've captured an image for you to verify. Take a look and let me know if you need me to keep watching or if there's anything else you'd like me to do."""
+                                else:
+                                    # Dangerous situation - Professional but urgent voice
+                                    time_now = datetime.utcnow().strftime('%I:%M %p')
+                                    alert_summary = f"""URGENT: I need your immediate attention.
+
+I've detected something concerning on Camera {camera_id} at {time_now}.
+
+What I'm seeing: {analysis.get('scene_description', 'A potentially hazardous situation').lower().capitalize()}
 
 **Activity:** {analysis.get('activity', 'Unknown activity')}
 
 **Objects Detected:** {', '.join(detected_objects) if detected_objects else 'None'}
 
-**Detection Details:** {len(detections_list)} objects identified
 **Time:** {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}
 **Camera:** {camera_id}
-**Context:** {context_summary[:150] if context_summary else 'No context'}
 
-**⚠️ ACTION REQUIRED:** Review this event immediately
-**Evidence Attached:** Full image and detailed analysis included
-**Alert Reason:** {'Dangerous activity' if has_dangerous_keyword else 'User task match' if user_task_active else 'Significant event change'}"""
-
-                                title = f"🚨 IMMEDIATE ACTION REQUIRED - Camera {camera_id}"
+**⚠️ URGENT:** Potential safety concern - review immediately
+**Evidence:** Image attached below"""
 
                                 # Send immediate alert
                                 immediate_alert_data = {
@@ -280,18 +506,21 @@ async def surveillance_worker():
                                     "message": alert_summary,
                                     "camera_id": camera_id,
                                     "timestamp": datetime.utcnow().isoformat(),
-                                    "significance": significance,
+                                    "significance": query_confidence if user_query else significance,
                                     "frame_url": frame_url,
                                     "frame_path": str(frame_path),
                                     "frame_base64": frame_base64,
                                     "detections": detections_list,
                                     "detected_objects": detected_objects,
                                     "alert_type": "immediate",
+                                    "user_query": user_query,
+                                    "query_match": query_match,
+                                    "query_confidence": query_confidence,
                                     "is_read": False
                                 }
 
                                 await manager.send_alert(immediate_alert_data)
-                                logger.info(f"🚨 IMMEDIATE ALERT SENT: {severity} - {significance}% - {detected_objects}")
+                                logger.info(f"🚨 IMMEDIATE ALERT SENT: {title} - Confidence: {query_confidence if user_query else significance}%")
 
                             # Don't collect for 2-minute summary if already sent immediate alert
                             # This prevents duplicate notifications
@@ -420,6 +649,7 @@ async def surveillance_worker():
                             logger.debug(f"Error checking tasks: {task_check_error}")
 
             # Check if 2 minutes have elapsed - send summary alert
+            logger.debug(f"[TIMER] Elapsed: {elapsed_seconds}s / {ANALYSIS_INTERVAL_SECONDS}s | Events: {len(critical_events)}")
             if elapsed_seconds >= ANALYSIS_INTERVAL_SECONDS:
                 logger.info(f"⏰ 2-MINUTE INTERVAL COMPLETE - Analyzing {len(critical_events)} events")
                 

@@ -45,12 +45,20 @@ function App() {
   useEffect(() => {
     // Connect to live feed
     wsService.connectLiveFeed((update) => {
+      console.log('Live feed update received:', {
+        camera_id: update.camera_id,
+        timestamp: update.timestamp,
+        hasFrame: !!update.frame,
+        frameLength: update.frame?.length
+      });
+      
       setLiveFeedData((prev) => {
         const newMap = new Map(prev);
         newMap.set(update.camera_id, {
           frame: update.frame,
           timestamp: update.timestamp
         });
+        console.log('Updated liveFeedData for camera:', update.camera_id);
         return newMap;
       });
     });
@@ -193,7 +201,7 @@ function App() {
 
   const tabs = [
     { id: 'dashboard', label: 'Dashboard', icon: '📊' },
-    { id: 'live', label: 'Live Feeds', icon: '📹' },
+    { id: 'live', label: 'Live Cameras', icon: '📹' },
     { id: 'alerts', label: 'Alerts', icon: '🚨' },
     { id: 'summary', label: 'Summary', icon: '📈' }
   ];

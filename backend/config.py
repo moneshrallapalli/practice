@@ -10,6 +10,7 @@ class Settings(BaseSettings):
 
     # API Configuration
     GEMINI_API_KEY: str
+    CLAUDE_API_KEY: str  # Anthropic Claude API key for reasoning agent
     GOOGLE_PROJECT_ID: Optional[str] = None
 
     # Database Configuration
@@ -41,7 +42,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
 
     # Camera Configuration
-    CAMERA_FPS: int = 0.2  # 0.2 FPS = 1 frame every 5 seconds = 12 calls/min (within free tier)
+    CAMERA_FPS: float = 0.033  # 0.033 FPS = 1 frame every 30 seconds = 2 calls/min (within free tier rate limit)
     MAX_CAMERAS: int = 4
     VIDEO_RESOLUTION_WIDTH: int = 640  # Reduced for faster processing
     VIDEO_RESOLUTION_HEIGHT: int = 480  # Reduced for faster processing
@@ -50,6 +51,7 @@ class Settings(BaseSettings):
     CRITICAL_THRESHOLD: int = 80
     WARNING_THRESHOLD: int = 50
     IMMEDIATE_ALERT_THRESHOLD: int = 60  # Threshold for immediate action required alerts
+    ACTIVITY_DETECTION_THRESHOLD: int = 40  # Lower threshold for activity/state changes (emergency mode)
 
     @property
     def database_url(self) -> str:

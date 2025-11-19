@@ -89,7 +89,8 @@ Be specific about objects. If you see a nail cutter, phone, or any tool - LIST I
         self,
         frame: np.ndarray,
         camera_id: int,
-        previous_context: Optional[str] = None
+        previous_context: Optional[str] = None,
+        user_query: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Analyze a single video frame using Gemini
@@ -98,19 +99,97 @@ Be specific about objects. If you see a nail cutter, phone, or any tool - LIST I
             frame: Video frame (numpy array)
             camera_id: Camera ID
             previous_context: Context from previous analysis
+            user_query: Optional user query to focus detection on (e.g., "look for scissors")
 
         Returns:
-            Analysis results
+            Analysis results with query_match_confidence if user_query provided
         """
         try:
             # Convert frame to PIL Image
             frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pil_image = Image.fromarray(frame_rgb)
 
-            # Build prompt with context
+            # Build prompt with context and user query
             prompt = self.system_prompt
             if previous_context:
                 prompt += f"\n\nPrevious context: {previous_context}"
+            
+            # Add user query for focused detection (with baseline context for state changes)
+            if user_query:
+                if previous_context and "BASELINE:" in previous_context:
+                    # User is tracking state changes - compare to baseline
+                    prompt += f"""
+
+🎯 CRITICAL STATE CHANGE DETECTION (HIGH PRIORITY):
+The user asked: "{user_query}"
+
+{previous_context}
+
+IMPORTANT - Compare current frame to BASELINE state:
+1. What has CHANGED from the baseline?
+2. Did the expected activity/state change occur?
+3. Is the condition the user is waiting for now TRUE?
+
+KEY DETECTION RULES:
+- If baseline had "person sitting" and now there's NO person → Person LEFT (HIGH confidence match!)
+- If baseline had "person present" and now frame is EMPTY → Person DEPARTED (HIGH confidence match!)
+- If baseline had object and now it's GONE → Object REMOVED (HIGH confidence match!)
+- Empty room AFTER person was there = SUCCESSFUL DEPARTURE (90%+ confidence!)
+
+CRITICAL: An EMPTY scene when person was there before IS A MATCH for "person leaves"!
+
+RESPOND WITH THESE EXTRA FIELDS:
+- "state_analysis": "Current state of the scene"
+- "baseline_match": true/false (does it still match the baseline, or has it changed?)
+- "query_match": true/false (did the user's expected change/activity happen?)
+- "query_confidence": 0-100 (MUST BE HIGH 80-95% if person left when they were sitting before!)
+- "query_details": "Detailed explanation of what changed and if it matches the query"
+- "changes_detected": ["list of changes from baseline"]
+- "person_present": true/false (is there a person in current frame?)
+- "person_was_present_in_baseline": true/false (was person in baseline?)
+
+USER'S EXPECTED CHANGE: {user_query}
+
+CRITICAL LOGIC:
+If baseline had person AND current frame has NO person → query_match=TRUE, query_confidence=90%+
+If person was sitting and now chair is empty → query_match=TRUE, query_confidence=90%+
+The ABSENCE of person (when they were present) IS THE KEY CHANGE!
+"""
+                else:
+                    # First frame or object detection - establish baseline or look for object
+                    prompt += f"""
+
+🎯 CRITICAL USER QUERY (HIGH PRIORITY):
+The user is looking for: "{user_query}"
+
+ANALYZE THE QUERY TYPE:
+- Is this about DETECTING AN OBJECT? (e.g., "find scissors")
+- Is this about DETECTING ACTIVITY/CHANGE? (e.g., "when person gets up")
+
+RESPOND WITH THESE EXTRA FIELDS:
+- "query_type": "object_detection" OR "activity_detection" OR "state_change_detection"
+- "current_state": "Describe the current state/scene in detail"
+- "baseline_established": true/false (is this the baseline state to track from?)
+- "query_match": true/false (is the query condition met in THIS frame?)
+- "query_confidence": 0-100 (confidence the query is satisfied)
+- "query_details": "Detailed explanation"
+
+For ACTIVITY/STATE CHANGE queries (like "when person gets up and leaves"):
+- Describe the CURRENT STATE thoroughly including ALL people present
+- Count people: "1 person sitting", "2 people standing", "0 people (empty)"
+- This may be the BASELINE to compare future frames against
+- Set baseline_established=true if this looks like the starting condition
+- CRITICAL: If query mentions "leaves" or "moves out", note the PRESENCE of people/objects
+
+For OBJECT DETECTION queries:
+- Just look for the specific object
+- Set query_match=true if found
+
+CRITICAL DETECTION LOGIC FOR "PERSON LEAVES" QUERIES:
+- Baseline: "Person sitting in chair" (person_count: 1)
+- Current: "Empty chair, no person" (person_count: 0)
+- Result: Person LEFT → query_match=TRUE, confidence=90%+
+"""
 
             # Generate analysis
             response = await asyncio.to_thread(
