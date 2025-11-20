@@ -306,38 +306,44 @@ function App() {
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
         {activeTab === 'dashboard' && (
           <>
-            {/* AI Command Center - Top Priority */}
-            <div className="w-full">
-              <SystemCommand onCommand={handleSystemCommand} />
-            </div>
-
-            {/* Daily Summary - Below Command Center */}
-            <div className="w-full">
-              <DailySummary stats={stats} />
-            </div>
-
-            {/* Main Dashboard Grid */}
+            {/* Row 1: Live Camera Feeds + Alerts Panel */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Left Column - Live Feeds (2/3 width) */}
-              <div className="lg:col-span-2 space-y-6">
+              {/* Live Camera Feed - 2/3 width */}
+              <div className="lg:col-span-2">
                 <LiveFeedGrid
                   cameras={cameras}
                   liveFeedData={liveFeedData}
                   onCameraStart={handleCameraStart}
                   onCameraStop={handleCameraStop}
                 />
-                <SceneNarration narrations={narrations} />
               </div>
 
-              {/* Right Column - Alerts & Quick Stats (1/3 width) */}
-              <div className="space-y-6">
+              {/* Alerts and Notifications - 1/3 width */}
+              <div>
                 <AlertPanel
                   alerts={alerts}
                   onAcknowledge={handleAcknowledgeAlert}
                   onClearAll={handleClearAllAlerts}
                 />
-                <SummaryStatsComponent stats={stats} />
               </div>
+            </div>
+
+            {/* Row 2: AI Command Center + Daily Summary */}
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+              {/* AI Command Center - 2/3 width */}
+              <div className="lg:col-span-2">
+                <SystemCommand onCommand={handleSystemCommand} />
+              </div>
+
+              {/* Daily Summary - 1/3 width */}
+              <div>
+                <DailySummary stats={stats} />
+              </div>
+            </div>
+
+            {/* Row 3: Live Scene Analysis - Full Width */}
+            <div className="w-full">
+              <SceneNarration narrations={narrations} />
             </div>
           </>
         )}
