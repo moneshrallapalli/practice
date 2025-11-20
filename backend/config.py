@@ -1,5 +1,5 @@
 """
-Configuration management for SentinTinel Surveillance System
+Configuration management for ThirdEye Intelligent Monitoring System
 """
 from pydantic_settings import BaseSettings
 from typing import Optional
@@ -13,8 +13,9 @@ class Settings(BaseSettings):
     CLAUDE_API_KEY: str  # Anthropic Claude API key for reasoning agent
     GOOGLE_PROJECT_ID: Optional[str] = None
 
-    # Email Configuration (Brevo - Most Reliable)
-    BREVO_API_KEY: Optional[str] = None
+    # Email Configuration
+    RESEND_API_KEY: Optional[str] = None  # Resend - Recommended (excellent deliverability)
+    BREVO_API_KEY: Optional[str] = None   # Brevo - Alternative
     EMAIL_RECIPIENT: str = "moneshralapalli@gmail.com"
 
     # Database Configuration

@@ -1,8 +1,9 @@
 """
-Email notification service using Resend API
-Much simpler and more reliable than SMTP
+Email notification service using Brevo (Sendinblue) API
+Simplest and most reliable option
 """
-import resend
+import sib_api_v3_sdk
+from sib_api_v3_sdk.rest import ApiException
 from typing import Dict, Any
 from datetime import datetime
 from loguru import logger
@@ -15,22 +16,26 @@ from config import settings
 
 
 class EmailService:
-    """Service for sending email notifications using Resend"""
+    """Service for sending email notifications using Brevo"""
     
     def __init__(self):
-        """Initialize Resend email service"""
-        self.resend_api_key = settings.RESEND_API_KEY if hasattr(settings, 'RESEND_API_KEY') else None
-        self.sender_email = "ThirdEye Monitoring <onboarding@resend.dev>"  # Free tier default
+        """Initialize Brevo email service"""
+        self.brevo_api_key = settings.BREVO_API_KEY if hasattr(settings, 'BREVO_API_KEY') else None
         self.recipient_email = settings.EMAIL_RECIPIENT
+        self.sender_email = "noreply@sentintinel.app"
+        self.sender_name = "SentinTinel AI"
         
         # Check if email is configured
-        self.enabled = bool(self.resend_api_key)
+        self.enabled = bool(self.brevo_api_key)
         
         if not self.enabled:
-            logger.warning("⚠️ Email notifications disabled - RESEND_API_KEY not configured in .env")
+            logger.warning("⚠️ Email notifications disabled - BREVO_API_KEY not configured in .env")
         else:
-            resend.api_key = self.resend_api_key
-            logger.info(f"📧 Resend email service initialized - will send to {self.recipient_email}")
+            # Configure Brevo API
+            configuration = sib_api_v3_sdk.Configuration()
+            configuration.api_key['api-key'] = self.brevo_api_key
+            self.api_instance = sib_api_v3_sdk.TransactionalEmailsApi(sib_api_v3_sdk.ApiClient(configuration))
+            logger.info(f"📧 Brevo email service initialized - will send to {self.recipient_email}")
     
     async def send_critical_alert(
         self,
@@ -82,12 +87,12 @@ class EmailService:
                          for obj in detected_objects]
                 detected_objects_html = f'<div style="margin-top: 16px;">{" ".join(badges)}</div>'
 
-            # Build image HTML using CID reference for attachment (more reliable than data URI)
+            # Build image HTML if frame_base64 is available
             image_html = ''
             if frame_base64:
                 image_html = f"""
                 <div style="margin-top: 20px; border-radius: 8px; overflow: hidden; border: 1px solid #374151; background: #111827;">
-                    <img src="cid:camera_frame" alt="Event Frame" style="width: 100%; max-height: 400px; object-fit: contain; display: block;" />
+                    <img src="data:image/jpeg;base64,{frame_base64}" alt="Event Frame" style="width: 100%; max-height: 400px; object-fit: contain; display: block;" />
                     <div style="padding: 8px; background: #1f2937; text-align: center; font-size: 12px; color: #9ca3af;">
                         📷 Supporting Evidence
                     </div>
@@ -136,35 +141,30 @@ class EmailService:
                         </div>
                     </div>
                     <div class="footer">
-                        ThirdEye - AI-Powered Intelligent Monitoring System
+                        SentinTinel AI Surveillance System
                     </div>
                 </div>
             </body>
             </html>
             """
 
-            # Prepare email parameters
-            params = {
-                "from": self.sender_email,
-                "to": [self.recipient_email],
-                "subject": f"{severity_emoji} {severity}: {title}",
-                "html": html_body
-            }
+            # Create email
+            send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+                to=[{"email": self.recipient_email}],
+                sender={"name": self.sender_name, "email": self.sender_email},
+                subject=f"{severity_emoji} {severity}: {title}",
+                html_content=html_body
+            )
 
-            # Add image as attachment if available (CID reference for inline display)
-            if frame_base64:
-                import base64
-                params["attachments"] = [{
-                    "filename": "camera_frame.jpg",
-                    "content": frame_base64,  # Resend accepts base64 string directly
-                    "content_id": "camera_frame"  # This matches cid:camera_frame in HTML
-                }]
-
-            response = resend.Emails.send(params)
+            # Send via Brevo
+            self.api_instance.send_transac_email(send_smtp_email)
 
             logger.info(f"✅ Critical alert email sent to {self.recipient_email}: {title}")
             return True
 
+        except ApiException as e:
+            logger.error(f"❌ Failed to send critical alert email: {e}")
+            return False
         except Exception as e:
             logger.error(f"❌ Failed to send critical alert email: {e}")
             return False
@@ -215,12 +215,12 @@ class EmailService:
                          for obj in detected_objects]
                 detected_objects_html = f'<div style="margin-top: 16px;">{" ".join(badges)}</div>'
 
-            # Build image HTML using CID reference for attachment (more reliable than data URI)
+            # Build image HTML if frame_base64 is available
             image_html = ''
             if frame_base64:
                 image_html = f"""
                 <div style="margin-top: 20px; border-radius: 8px; overflow: hidden; border: 1px solid #374151; background: #111827;">
-                    <img src="cid:camera_frame" alt="Event Frame" style="width: 100%; max-height: 400px; object-fit: contain; display: block;" />
+                    <img src="data:image/jpeg;base64,{frame_base64}" alt="Event Frame" style="width: 100%; max-height: 400px; object-fit: contain; display: block;" />
                     <div style="padding: 8px; background: #1f2937; text-align: center; font-size: 12px; color: #9ca3af;">
                         📷 Most Significant Frame
                     </div>
@@ -276,35 +276,30 @@ class EmailService:
                         </div>
                     </div>
                     <div class="footer">
-                        ThirdEye - AI-Powered Intelligent Monitoring System
+                        SentinTinel AI Surveillance System
                     </div>
                 </div>
             </body>
             </html>
             """
 
-            # Prepare email parameters
-            params = {
-                "from": self.sender_email,
-                "to": [self.recipient_email],
-                "subject": f"{severity_emoji} {title}",
-                "html": html_body
-            }
+            # Create email
+            send_smtp_email = sib_api_v3_sdk.SendSmtpEmail(
+                to=[{"email": self.recipient_email}],
+                sender={"name": self.sender_name, "email": self.sender_email},
+                subject=f"{severity_emoji} {title}",
+                html_content=html_body
+            )
 
-            # Add image as attachment if available (CID reference for inline display)
-            if frame_base64:
-                import base64
-                params["attachments"] = [{
-                    "filename": "camera_frame.jpg",
-                    "content": frame_base64,  # Resend accepts base64 string directly
-                    "content_id": "camera_frame"  # This matches cid:camera_frame in HTML
-                }]
-
-            response = resend.Emails.send(params)
+            # Send via Brevo
+            self.api_instance.send_transac_email(send_smtp_email)
 
             logger.info(f"✅ Summary email sent to {self.recipient_email}: {title}")
             return True
 
+        except ApiException as e:
+            logger.error(f"❌ Failed to send summary email: {e}")
+            return False
         except Exception as e:
             logger.error(f"❌ Failed to send summary email: {e}")
             return False

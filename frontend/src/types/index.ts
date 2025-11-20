@@ -1,5 +1,5 @@
 /**
- * Type definitions for SentinTinel Surveillance System
+ * Type definitions for ThirdEye Intelligent Monitoring System
  */
 
 export enum AlertSeverity {

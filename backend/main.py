@@ -1,5 +1,5 @@
 """
-Main FastAPI application for SentinTinel Surveillance System
+Main FastAPI application for ThirdEye Intelligent Monitoring System
 """
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
     Lifespan context manager for startup and shutdown
     """
     # Startup
-    logger.info("Starting SentinTinel Surveillance System...")
+    logger.info("Starting ThirdEye Intelligent Monitoring System...")
 
     # Initialize database (optional - continue if fails)
     try:
@@ -52,7 +52,7 @@ async def lifespan(app: FastAPI):
 
 # Create FastAPI app
 app = FastAPI(
-    title="SentinTinel Surveillance API",
+    title="ThirdEye Monitoring API",
     description="AI-powered surveillance system with Gemini integration",
     version="1.0.0",
     lifespan=lifespan
@@ -85,7 +85,7 @@ async def root():
     Root endpoint
     """
     return {
-        "name": "SentinTinel Surveillance System",
+        "name": "ThirdEye Intelligent Monitoring System",
         "version": "1.0.0",
         "status": "running",
         "docs": "/docs"
