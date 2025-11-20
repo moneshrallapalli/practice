@@ -3,7 +3,7 @@
  * Camera 0: Real active surveillance
  * Cameras 1-3: Dummy video playback
  */
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { Camera } from '../types';
 
 interface LiveFeedGridProps {
@@ -21,12 +21,13 @@ const LiveFeedGrid: React.FC<LiveFeedGridProps> = ({
 }) => {
   const videoRefs = useRef<{ [key: number]: HTMLVideoElement | null }>({});
   const [playingVideos, setPlayingVideos] = useState<Set<number>>(new Set());
+  const [hasInteracted, setHasInteracted] = useState(false);
 
   // Dummy camera configuration
   const dummyCameras = [
     { id: 1, name: 'Camera 1 - Entrance', location: 'Front Door', videoPath: '/dummy_camera.mov' },
-    { id: 2, name: 'Camera 2 - Hallway', location: 'Main Corridor', videoPath: '/dummy_camera.mov' },
-    { id: 3, name: 'Camera 3 - Parking', location: 'Parking Lot', videoPath: '/dummy_camera.mov' }
+    { id: 2, name: 'Shoemaker', location: 'Workshop Area', videoPath: '/shoemaker.mov' },
+    { id: 3, name: 'Parking', location: 'Parking Lot', videoPath: '/parking_video.mp4' }
   ];
 
   // Find camera 0 or create a default one
@@ -39,6 +40,39 @@ const LiveFeedGrid: React.FC<LiveFeedGridProps> = ({
   };
 
   const allCameras = [realCamera, ...dummyCameras];
+
+  // Start all videos on first user interaction (due to browser autoplay policy)
+  useEffect(() => {
+    const startAllVideos = () => {
+      if (hasInteracted) return;
+
+      setHasInteracted(true);
+      dummyCameras.forEach((camera) => {
+        const video = videoRefs.current[camera.id];
+        if (video) {
+          video.play()
+            .then(() => {
+              console.log(`Camera ${camera.id} started playing`);
+            })
+            .catch(err => {
+              console.error(`Error playing camera ${camera.id}:`, err);
+            });
+        }
+      });
+    };
+
+    // Listen for any user interaction
+    const events = ['click', 'touchstart', 'keydown'];
+    events.forEach(event => {
+      document.addEventListener(event, startAllVideos, { once: true });
+    });
+
+    return () => {
+      events.forEach(event => {
+        document.removeEventListener(event, startAllVideos);
+      });
+    };
+  }, [hasInteracted]);
 
   const handleDummyCameraClick = (cameraId: number) => {
     const video = videoRefs.current[cameraId];
@@ -135,12 +169,26 @@ const LiveFeedGrid: React.FC<LiveFeedGridProps> = ({
                 onClick={() => handleDummyCameraClick(camera.id)}
               >
                 <video
-                  ref={(el) => videoRefs.current[camera.id] = el}
+                  ref={(el) => {
+                    if (el) {
+                      videoRefs.current[camera.id] = el;
+                      // Set muted via JavaScript to ensure autoplay works
+                      el.muted = true;
+                      el.defaultMuted = true;
+                    }
+                  }}
                   src={camera.videoPath}
                   className="w-full h-full object-cover"
+                  autoPlay
                   loop
                   muted
                   playsInline
+                  onPlay={() => setPlayingVideos(prev => new Set(prev).add(camera.id))}
+                  onPause={() => setPlayingVideos(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(camera.id);
+                    return newSet;
+                  })}
                 />
                 {/* Play/Pause overlay */}
                 <div className="absolute inset-0 bg-black/30 opacity-0 group-hover/video:opacity-100 transition-opacity flex items-center justify-center">
@@ -156,25 +204,10 @@ const LiveFeedGrid: React.FC<LiveFeedGridProps> = ({
                     )}
                   </div>
                 </div>
-                {isPlaying && (
-                  <div className="absolute top-3 right-3 bg-gradient-to-r from-cyan-500 to-blue-600 text-white text-xs px-3 py-1.5 rounded-full shadow-lg flex items-center gap-1">
-                    <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></span>
-                    RECORDING
-                  </div>
-                )}
-                {!isPlaying && (
-                  <div className="absolute inset-0 bg-gradient-to-br from-dark-900/80 to-dark-800/80 flex items-center justify-center">
-                    <div className="text-center">
-                      <div className="bg-cyan-500/20 rounded-full p-4 inline-block mb-3 border-2 border-cyan-500/30">
-                        <svg className="w-10 h-10 text-cyan-400" fill="currentColor" viewBox="0 0 24 24">
-                          <path d="M8 5v14l11-7z" />
-                        </svg>
-                      </div>
-                      <p className="text-gray-300 font-medium">Click to Play</p>
-                      <p className="text-xs text-gray-500 mt-1">Recorded Footage</p>
-                    </div>
-                  </div>
-                )}
+                <div className="absolute top-3 right-3 bg-gradient-to-r from-cyan-500 to-blue-600 text-white text-xs px-3 py-1.5 rounded-full shadow-lg flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 bg-white rounded-full animate-pulse"></span>
+                  {isPlaying ? 'RECORDING' : 'PAUSED'}
+                </div>
               </div>
             ) : (
               <div className="w-full h-full flex items-center justify-center text-gray-500">
